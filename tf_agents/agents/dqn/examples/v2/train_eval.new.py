@@ -79,6 +79,7 @@ flags.DEFINE_multi_string('gin_file', None, 'Paths to the gin-config files.')
 flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
 flags.DEFINE_bool('use_tensorboard', False, 'Record autograph as graph viewable in tensorboard at --logdir=<--root_dir>/train')
 flags.DEFINE_bool('python_mode', False, 'Run everything eagerly from python (disable autograph)')
+flags.DEFINE_bool('use_tf_functions', True, 'Use tf.function on tf_agent.train and driver.run')
 flags.DEFINE_integer('log_stacktrace_freq', None, 'Dump stack traces from logged calls (e.g., calling into C++ TensorFlow API)')
 
 FLAGS = flags.FLAGS
@@ -169,10 +170,16 @@ if WRAP_TF_SESSION_RUN:
   tf.compat.v1.Session.run = wrapped_tf_Session_run
 
   from tensorflow.python import pywrap_tfe
+
   original_pywrap_tfe_TFE_Py_Execute = pywrap_tfe.TFE_Py_Execute
   def wrapped_pywrap_tfe_TFE_Py_Execute(*args, **kwargs):
     return log_call(original_pywrap_tfe_TFE_Py_Execute, "TFE_Py_Execute", *args, **kwargs)
   pywrap_tfe.TFE_Py_Execute = wrapped_pywrap_tfe_TFE_Py_Execute
+
+  original_pywrap_tfe_TFE_Py_FastPathExecute = pywrap_tfe.TFE_Py_FastPathExecute
+  def wrapped_pywrap_tfe_TFE_Py_FastPathExecute(*args, **kwargs):
+    return log_call(original_pywrap_tfe_TFE_Py_FastPathExecute, "TFE_Py_FastPathExecute", *args, **kwargs)
+  pywrap_tfe.TFE_Py_FastPathExecute = wrapped_pywrap_tfe_TFE_Py_FastPathExecute
 
 @gin.configurable
 def train_eval(
@@ -251,11 +258,12 @@ def train_eval(
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
 
-    # tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
-    # eval_tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
+    tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
+    eval_tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
 
-    tf_env = suite_gym.load(env_name)
-    eval_tf_env = suite_gym.load(env_name)
+    # Doesn't work.
+    # tf_env = suite_gym.load(env_name)
+    # eval_tf_env = suite_gym.load(env_name)
 
     if train_sequence_length != 1 and n_step_update != 1:
       raise NotImplementedError(
@@ -453,7 +461,7 @@ def train_eval(
             writer=train_summary_writer)
       time_acc += time.time() - start_time
 
-      if global_step.numpy() % log_interval == 0:
+      if global_step.numpy() % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
         logging.info('step = %d, loss = %f', global_step.numpy(),
                      train_loss.loss)
         steps_per_sec = (global_step.numpy() - timed_at_step) / time_acc
@@ -465,18 +473,18 @@ def train_eval(
 
       for train_metric in train_metrics:
         train_metric.tf_summaries(
-            train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result
+            train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result; TFE_Py_FastPathExecute to read variables
 
-      if global_step.numpy() % train_checkpoint_interval == 0:
+      if global_step.numpy() % train_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
         train_checkpointer.save(global_step=global_step.numpy())
 
-      if global_step.numpy() % policy_checkpoint_interval == 0:
+      if global_step.numpy() % policy_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
         policy_checkpointer.save(global_step=global_step.numpy())
 
-      if global_step.numpy() % rb_checkpoint_interval == 0:
+      if global_step.numpy() % rb_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
         rb_checkpointer.save(global_step=global_step.numpy())
 
-      if global_step.numpy() % eval_interval == 0:
+      if global_step.numpy() % eval_interval == 0: # TFE_Py_FastPathExecute x2
         results = metric_utils.eager_compute(
             eval_metrics,
             eval_tf_env,
@@ -523,11 +531,12 @@ def main(_):
     tf.compat.v1.enable_v2_behavior()
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
     train_eval(
-        FLAGS.root_dir,
-        num_iterations=FLAGS.num_iterations,
-        use_tensorboard=FLAGS.use_tensorboard,
-        python_mode=FLAGS.python_mode,
-        log_stacktrace_freq=FLAGS.log_stacktrace_freq)
+      FLAGS.root_dir,
+      num_iterations=FLAGS.num_iterations,
+      use_tf_functions=FLAGS.use_tf_functions,
+      use_tensorboard=FLAGS.use_tensorboard,
+      python_mode=FLAGS.python_mode,
+      log_stacktrace_freq=FLAGS.log_stacktrace_freq)
   finally:
     log_stacktraces()
 
