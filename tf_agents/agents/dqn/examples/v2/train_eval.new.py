@@ -50,6 +50,8 @@ from io import StringIO
 
 import traceback
 
+import iml_profiler.api as iml
+
 from absl import app
 from absl import flags
 from absl import logging
@@ -81,6 +83,10 @@ flags.DEFINE_bool('use_tensorboard', False, 'Record autograph as graph viewable 
 flags.DEFINE_bool('python_mode', False, 'Run everything eagerly from python (disable autograph)')
 flags.DEFINE_bool('use_tf_functions', True, 'Use tf.function on tf_agent.train and driver.run')
 flags.DEFINE_integer('log_stacktrace_freq', None, 'Dump stack traces from logged calls (e.g., calling into C++ TensorFlow API)')
+flags.DEFINE_string('env_name', 'CartPole-v0', 'Environment')
+
+iml.add_iml_arguments(flags)
+# iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
 
 FLAGS = flags.FLAGS
 
@@ -146,40 +152,36 @@ class _LoggedStackTraces:
       ))
       st.print(ss, indent=indent+2, skip_last=skip_last)
 
-LoggedStackTraces = _LoggedStackTraces()
 
+LoggedStackTraces = None
+def setup_logging_stack_traces():
+  global LoggedStackTraces
+  WRAP_TF_SESSION_RUN = FLAGS.log_stacktrace_freq is not None
+  if WRAP_TF_SESSION_RUN:
+    LoggedStackTraces = _LoggedStackTraces()
 
-WRAP_TF_SESSION_RUN = True
-if WRAP_TF_SESSION_RUN:
-  def log_call(func, name, *args, **kwargs):
-    if LoggedStackTraces is not None:
-      stack = traceback.format_stack()
-      # # stack[-1] = Call to "traceback.format_stack()"
-      # # stack[-2] = Call to "return log_call(...)"
-      # stack_keep = stack[:-2]
-      # logging.info("{name}(...):\n{stack}".format(
-      #   name=name,
-      #   stack=textwrap.indent(''.join(stack_keep), prefix='  '),
-      # ))
-      LoggedStackTraces.log_call(name, stack)
-    return func(*args, **kwargs)
+    def log_call(func, name, *args, **kwargs):
+      if LoggedStackTraces is not None:
+        stack = traceback.format_stack()
+        LoggedStackTraces.log_call(name, stack)
+      return func(*args, **kwargs)
 
-  original_tf_Session_run = tf.compat.v1.Session.run
-  def wrapped_tf_Session_run(self, fetches, feed_dict=None, options=None, run_metadata=None):
-    return log_call(original_tf_Session_run, "tf.Session.run", self, fetches, feed_dict=feed_dict, options=options, run_metadata=run_metadata)
-  tf.compat.v1.Session.run = wrapped_tf_Session_run
+    original_tf_Session_run = tf.compat.v1.Session.run
+    def wrapped_tf_Session_run(self, fetches, feed_dict=None, options=None, run_metadata=None):
+      return log_call(original_tf_Session_run, "tf.Session.run", self, fetches, feed_dict=feed_dict, options=options, run_metadata=run_metadata)
+    tf.compat.v1.Session.run = wrapped_tf_Session_run
 
-  from tensorflow.python import pywrap_tfe
+    from tensorflow.python import pywrap_tfe
 
-  original_pywrap_tfe_TFE_Py_Execute = pywrap_tfe.TFE_Py_Execute
-  def wrapped_pywrap_tfe_TFE_Py_Execute(*args, **kwargs):
-    return log_call(original_pywrap_tfe_TFE_Py_Execute, "TFE_Py_Execute", *args, **kwargs)
-  pywrap_tfe.TFE_Py_Execute = wrapped_pywrap_tfe_TFE_Py_Execute
+    original_pywrap_tfe_TFE_Py_Execute = pywrap_tfe.TFE_Py_Execute
+    def wrapped_pywrap_tfe_TFE_Py_Execute(*args, **kwargs):
+      return log_call(original_pywrap_tfe_TFE_Py_Execute, "TFE_Py_Execute", *args, **kwargs)
+    pywrap_tfe.TFE_Py_Execute = wrapped_pywrap_tfe_TFE_Py_Execute
 
-  original_pywrap_tfe_TFE_Py_FastPathExecute = pywrap_tfe.TFE_Py_FastPathExecute
-  def wrapped_pywrap_tfe_TFE_Py_FastPathExecute(*args, **kwargs):
-    return log_call(original_pywrap_tfe_TFE_Py_FastPathExecute, "TFE_Py_FastPathExecute", *args, **kwargs)
-  pywrap_tfe.TFE_Py_FastPathExecute = wrapped_pywrap_tfe_TFE_Py_FastPathExecute
+    original_pywrap_tfe_TFE_Py_FastPathExecute = pywrap_tfe.TFE_Py_FastPathExecute
+    def wrapped_pywrap_tfe_TFE_Py_FastPathExecute(*args, **kwargs):
+      return log_call(original_pywrap_tfe_TFE_Py_FastPathExecute, "TFE_Py_FastPathExecute", *args, **kwargs)
+    pywrap_tfe.TFE_Py_FastPathExecute = wrapped_pywrap_tfe_TFE_Py_FastPathExecute
 
 @gin.configurable
 def train_eval(
@@ -233,6 +235,31 @@ def train_eval(
   root_dir = os.path.expanduser(root_dir)
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
+
+  # Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+  # (hence, we run lots more iterations than DDPG/PPO).
+  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+  iml.prof.set_max_passes(10, skip_if_set=True)
+  # 1 configuration pass.
+  iml.prof.set_delay_passes(1, skip_if_set=True)
+
+  operations_available = set([
+    'train_step',
+    'collect_data',
+    'log_metrics',
+    'eval_model',
+  ])
+  operations_seen = set([])
+  def iml_prof_operation(operation):
+    should_skip = operation not in operations_available
+    op = iml.prof.operation(operation, skip=should_skip)
+    if not should_skip:
+      operations_seen.add(operation)
+    return op
 
   if python_mode:
     # NOTE: this is even WORSE than TF v1 stable-baselines.  With stable-baselines, at least the forward and backward
@@ -416,9 +443,42 @@ def train_eval(
 
     if use_tf_functions:
       train_step = common.function(train_step)
-      # train_step = common.function(train_step, autograph=False)
+
+    def iml_is_warmed_up(operations_seen, operations_available):
+      """
+      Return true once we are executing the full training-loop.
+
+      :return:
+      """
+      assert operations_seen.issubset(operations_available)
+      # can_sample = replay_buffer.can_sample(batch_size)
+      # return can_sample and operations_seen == operations_available and num_timesteps > learning_starts
+      return operations_seen == operations_available
 
     for iteration in range(num_iterations):
+
+      if iml.prof.delay and iml_is_warmed_up(operations_seen, operations_available) and not iml.prof.tracing_enabled:
+        # Entire training loop is now running; enable IML tracing
+        iml.prof.enable_tracing()
+
+      # GOAL: we only want to call report_progress once we've seen ALL the operations run
+      # (i.e., q_backward, q_update_target_network).  This will ensure that the GPU HW sampler
+      # will see ALL the possible GPU operations.
+      if iml.prof.debug:
+        iml.logger.info(textwrap.dedent("""\
+        RLS: @ t={iteration}: operations_seen = {operations_seen}
+          waiting for = {waiting_for}
+        """.format(
+          iteration=iteration,
+          operations_seen=operations_seen,
+          waiting_for=operations_available.difference(operations_seen),
+        )).rstrip())
+      if operations_seen == operations_available:
+        operations_seen.clear()
+        iml.prof.report_progress(
+          percent_complete=iteration/float(num_iterations),
+          num_timesteps=iteration,
+          total_timesteps=num_iterations)
 
       if log_stacktrace_freq is not None and iteration % log_stacktrace_freq == 0:
         log_stacktraces()
@@ -430,7 +490,8 @@ def train_eval(
       trace_name = 'collect_driver.run'
       if trace:
           logging.info(f"TRACE: {trace_name}")
-      time_step, policy_state = with_summary_trace(
+      with iml_prof_operation('collect_data'):
+        time_step, policy_state = with_summary_trace(
           lambda: collect_driver.run( # TFE_Py_Execute each loop iter
               time_step=time_step,
               policy_state=policy_state,
@@ -452,51 +513,57 @@ def train_eval(
         trace_name = 'tf_agent.train(experience)'
         if trace:
             logging.info(f"TRACE: {trace_name}")
-        train_loss = with_summary_trace(
-            lambda: train_step(), # TFE_Py_Execute each loop iter
-            trace_name,
-            train_dir,
-            trace=trace,
-            step=iteration*train_steps_per_iteration + train_iteration,
-            writer=train_summary_writer)
+        with iml_prof_operation('train_step'):
+          train_loss = with_summary_trace(
+              lambda: train_step(), # TFE_Py_Execute each loop iter
+              trace_name,
+              train_dir,
+              trace=trace,
+              step=iteration*train_steps_per_iteration + train_iteration,
+              writer=train_summary_writer)
       time_acc += time.time() - start_time
 
-      if global_step.numpy() % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
-        logging.info('step = %d, loss = %f', global_step.numpy(),
-                     train_loss.loss)
-        steps_per_sec = (global_step.numpy() - timed_at_step) / time_acc
-        logging.info('%.3f steps/sec', steps_per_sec)
-        tf.compat.v2.summary.scalar(
-            name='global_steps_per_sec', data=steps_per_sec, step=global_step)
-        timed_at_step = global_step.numpy()
-        time_acc = 0
+      global_step_value = None
+      with iml_prof_operation('log_metrics'):
+        global_step_value = global_step.numpy()
 
-      for train_metric in train_metrics:
-        train_metric.tf_summaries(
-            train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result; TFE_Py_FastPathExecute to read variables
+        if global_step_value % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
+          logging.info('step = %d, loss = %f', global_step_value,
+                       train_loss.loss)
+          steps_per_sec = (global_step_value - timed_at_step) / time_acc
+          logging.info('%.3f steps/sec', steps_per_sec)
+          tf.compat.v2.summary.scalar(
+              name='global_steps_per_sec', data=steps_per_sec, step=global_step)
+          timed_at_step = global_step_value
+          time_acc = 0
 
-      if global_step.numpy() % train_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-        train_checkpointer.save(global_step=global_step.numpy())
+        for train_metric in train_metrics:
+          train_metric.tf_summaries(
+              train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result; TFE_Py_FastPathExecute to read variables
 
-      if global_step.numpy() % policy_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-        policy_checkpointer.save(global_step=global_step.numpy())
+        if global_step_value % train_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+          train_checkpointer.save(global_step=global_step_value)
 
-      if global_step.numpy() % rb_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-        rb_checkpointer.save(global_step=global_step.numpy())
+        if global_step_value % policy_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+          policy_checkpointer.save(global_step=global_step_value)
 
-      if global_step.numpy() % eval_interval == 0: # TFE_Py_FastPathExecute x2
-        results = metric_utils.eager_compute(
-            eval_metrics,
-            eval_tf_env,
-            eval_policy,
-            num_episodes=num_eval_episodes,
-            train_step=global_step,
-            summary_writer=eval_summary_writer,
-            summary_prefix='Metrics',
-        )
-        if eval_metrics_callback is not None:
-          eval_metrics_callback(results, global_step.numpy())
-        metric_utils.log_metrics(eval_metrics)
+        if global_step_value % rb_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+          rb_checkpointer.save(global_step=global_step_value)
+
+      if global_step_value % eval_interval == 0: # TFE_Py_FastPathExecute x2
+        with iml_prof_operation('eval_model'):
+          results = metric_utils.eager_compute(
+              eval_metrics,
+              eval_tf_env,
+              eval_policy,
+              num_episodes=num_eval_episodes,
+              train_step=global_step,
+              summary_writer=eval_summary_writer,
+              summary_prefix='Metrics',
+          )
+          if eval_metrics_callback is not None:
+            eval_metrics_callback(results, global_step_value)
+          metric_utils.log_metrics(eval_metrics)
 
     return train_loss
 
@@ -528,15 +595,29 @@ def with_summary_trace(func, name, logdir, trace, step=0, graph=True, profiler=T
 def main(_):
   try:
     logging.set_verbosity(logging.INFO)
+    setup_logging_stack_traces()
     tf.compat.v1.enable_v2_behavior()
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
-    train_eval(
-      FLAGS.root_dir,
-      num_iterations=FLAGS.num_iterations,
-      use_tf_functions=FLAGS.use_tf_functions,
-      use_tensorboard=FLAGS.use_tensorboard,
-      python_mode=FLAGS.python_mode,
-      log_stacktrace_freq=FLAGS.log_stacktrace_freq)
+
+    iml_dir = os.path.join(FLAGS.root_dir, 'iml')
+    iml.handle_gflags_iml_args(FLAGS, directory=iml_dir, reports_progress=True)
+    iml.prof.set_metadata({
+      'algo': 'dqn',
+      'env': FLAGS.env_name,
+    })
+
+    process_name = 'dqn_train_eval'
+    phase_name = process_name
+    with iml.prof.profile(process_name=process_name, phase_name=phase_name):
+      train_eval(
+        FLAGS.root_dir,
+        env_name=FLAGS.env_name,
+        num_iterations=FLAGS.num_iterations,
+        use_tf_functions=FLAGS.use_tf_functions,
+        use_tensorboard=FLAGS.use_tensorboard,
+        python_mode=FLAGS.python_mode,
+        log_stacktrace_freq=FLAGS.log_stacktrace_freq)
+
   finally:
     log_stacktraces()
 
