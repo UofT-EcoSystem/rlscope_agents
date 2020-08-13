@@ -215,7 +215,12 @@ def train_eval(
     use_tf_functions=True,
     # Params for eval
     num_eval_episodes=10,
+    # FAILS:
     eval_interval=1000,
+    # WORKS:
+    # eval_interval=100,
+    # WORKS:
+    # eval_interval=10,
     # Params for checkpoints
     train_checkpoint_interval=10000,
     policy_checkpoint_interval=5000,
@@ -250,8 +255,9 @@ def train_eval(
   operations_available = set([
     'train_step',
     'collect_data',
-    'log_metrics',
-    'eval_model',
+    # 'log_metrics',
+    # 'eval_model',
+    # 'sleep_1_sec',
   ])
   operations_seen = set([])
   def iml_prof_operation(operation):
@@ -523,47 +529,67 @@ def train_eval(
               writer=train_summary_writer)
       time_acc += time.time() - start_time
 
+      #
+      # Sanity check: SM metrics should be 0 when we aren't using the GPU.
+      #
+      # RESULT: looks reasonable:
+      #   - SM occupancy = 0%
+      #   - SM efficiency = 0%
+      #   - GPU instructions executed = 0
+      #
+      # CONCERN: GPU operations may still be running if operations are queued to run asynchronously
+      # and block only when results are queryed.
+      #
+      # with iml_prof_operation('sleep_1_sec'):
+      #   time.sleep(1)
+
       global_step_value = None
-      with iml_prof_operation('log_metrics'):
-        global_step_value = global_step.numpy()
+      # Don't care about logging metrics for now.
+      #
+      # with iml_prof_operation('log_metrics'):
+      global_step_value = global_step.numpy()
 
-        if global_step_value % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
-          logging.info('step = %d, loss = %f', global_step_value,
-                       train_loss.loss)
-          steps_per_sec = (global_step_value - timed_at_step) / time_acc
-          logging.info('%.3f steps/sec', steps_per_sec)
-          tf.compat.v2.summary.scalar(
-              name='global_steps_per_sec', data=steps_per_sec, step=global_step)
-          timed_at_step = global_step_value
-          time_acc = 0
+      if global_step_value % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
+        logging.info('step = %d, loss = %f', global_step_value,
+                     train_loss.loss)
+        steps_per_sec = (global_step_value - timed_at_step) / time_acc
+        logging.info('%.3f steps/sec', steps_per_sec)
+        tf.compat.v2.summary.scalar(
+            name='global_steps_per_sec', data=steps_per_sec, step=global_step)
+        timed_at_step = global_step_value
+        time_acc = 0
 
-        for train_metric in train_metrics:
-          train_metric.tf_summaries(
-              train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result; TFE_Py_FastPathExecute to read variables
+      for train_metric in train_metrics:
+        train_metric.tf_summaries(
+            train_step=global_step, step_metrics=train_metrics[:2]) # TFE_Py_Execute each loop iter with 2 calls: AverageReturnMetric.result, AverageEpisodeLengthMetric.result; TFE_Py_FastPathExecute to read variables
 
-        if global_step_value % train_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-          train_checkpointer.save(global_step=global_step_value)
+      if global_step_value % train_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+        train_checkpointer.save(global_step=global_step_value)
 
-        if global_step_value % policy_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-          policy_checkpointer.save(global_step=global_step_value)
+      if global_step_value % policy_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+        policy_checkpointer.save(global_step=global_step_value)
 
-        if global_step_value % rb_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
-          rb_checkpointer.save(global_step=global_step_value)
+      if global_step_value % rb_checkpoint_interval == 0: # TFE_Py_FastPathExecute x2
+        rb_checkpointer.save(global_step=global_step_value)
 
       if global_step_value % eval_interval == 0: # TFE_Py_FastPathExecute x2
-        with iml_prof_operation('eval_model'):
-          results = metric_utils.eager_compute(
-              eval_metrics,
-              eval_tf_env,
-              eval_policy,
-              num_episodes=num_eval_episodes,
-              train_step=global_step,
-              summary_writer=eval_summary_writer,
-              summary_prefix='Metrics',
-          )
-          if eval_metrics_callback is not None:
-            eval_metrics_callback(results, global_step_value)
-          metric_utils.log_metrics(eval_metrics)
+        # HACK: Sadly, calling this every 1000 steps causes buggy behaviour from CUPTI profiling APIs.
+        # So, lets continue running eval_model, but ignore it's contribution to runtime
+        # (which the code already does anyways when reporting steps per second).
+        #
+        # with iml_prof_operation('eval_model'):
+        results = metric_utils.eager_compute(
+            eval_metrics,
+            eval_tf_env,
+            eval_policy,
+            num_episodes=num_eval_episodes,
+            train_step=global_step,
+            summary_writer=eval_summary_writer,
+            summary_prefix='Metrics',
+        )
+        if eval_metrics_callback is not None:
+          eval_metrics_callback(results, global_step_value)
+        metric_utils.log_metrics(eval_metrics)
 
     return train_loss
 
