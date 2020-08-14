@@ -42,6 +42,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import sys
+import pprint
 import os
 import time
 import datetime
@@ -73,7 +75,7 @@ from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
 
-flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
+flags.DEFINE_string('root_dir', None,
                     'Root directory for writing logs/summaries/checkpoints.')
 flags.DEFINE_integer('num_iterations', 100000,
                      'Total number train/eval iterations to perform.')
@@ -625,8 +627,30 @@ def main(_):
     tf.compat.v1.enable_v2_behavior()
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
-    iml_dir = os.path.join(FLAGS.root_dir, 'iml')
-    iml.handle_gflags_iml_args(FLAGS, directory=iml_dir, reports_progress=True)
+    # TODO: iterate over iml args and do this to fix:
+    #     FLAGS['iml_directory'] = FLAGS['iml-directory']
+    iml.fix_gflags_iml_args(FLAGS)
+
+    if ( FLAGS.iml_directory is None and FLAGS.root_dir is None ) or \
+        ( FLAGS.iml_directory is not None and FLAGS.root_dir is not None ):
+      print(FLAGS.get_help(), file=sys.stderr)
+      logging.error("Need --root-dir or --iml-directory")
+      sys.exit(1)
+
+    # logging.info(pprint.pformat({
+    #   'FLAGS.iml_directory': FLAGS.iml_directory,
+    #   'FLAGS.root_dir': FLAGS.root_dir,
+    # }))
+
+    if FLAGS.iml_directory is not None:
+      root_dir = os.path.join(FLAGS.iml_directory, 'train_eval')
+      iml_directory = os.path.join(FLAGS.iml_directory, 'iml')
+    else:
+      assert FLAGS.root_dir is not None
+      root_dir = os.path.join(FLAGS.root_dir, 'train_eval')
+      iml_directory = os.path.join(FLAGS.root_dir, 'iml')
+
+    iml.handle_gflags_iml_args(FLAGS, directory=iml_directory, reports_progress=True)
     iml.prof.set_metadata({
       'algo': 'dqn',
       'env': FLAGS.env_name,
@@ -636,7 +660,7 @@ def main(_):
     phase_name = process_name
     with iml.prof.profile(process_name=process_name, phase_name=phase_name):
       train_eval(
-        FLAGS.root_dir,
+        root_dir,
         env_name=FLAGS.env_name,
         num_iterations=FLAGS.num_iterations,
         use_tf_functions=FLAGS.use_tf_functions,
@@ -657,5 +681,5 @@ def log_stacktraces():
 
 
 if __name__ == '__main__':
-  flags.mark_flag_as_required('root_dir')
+  # flags.mark_flag_as_required('root_dir')
   app.run(main)
