@@ -42,6 +42,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import re
 import sys
 import pprint
 import os
@@ -64,7 +65,7 @@ import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.drivers import dynamic_step_driver
-from tf_agents.environments import suite_gym
+from tf_agents.environments import suite_gym, suite_pybullet
 from tf_agents.environments import tf_py_environment
 from tf_agents.environments.examples import masked_cartpole  # pylint: disable=unused-import
 from tf_agents.eval import metric_utils
@@ -74,6 +75,8 @@ from tf_agents.networks import q_rnn_network
 from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
+
+import gym
 
 flags.DEFINE_string('root_dir', None,
                     'Root directory for writing logs/summaries/checkpoints.')
@@ -86,6 +89,7 @@ flags.DEFINE_bool('python_mode', False, 'Run everything eagerly from python (dis
 flags.DEFINE_bool('use_tf_functions', True, 'Use tf.function on tf_agent.train and driver.run')
 flags.DEFINE_integer('log_stacktrace_freq', None, 'Dump stack traces from logged calls (e.g., calling into C++ TensorFlow API)')
 flags.DEFINE_string('env_name', 'CartPole-v0', 'Environment')
+flags.DEFINE_bool('list_env', False, 'List available Environments')
 
 iml.add_iml_arguments(flags)
 # iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
@@ -626,6 +630,18 @@ def main(_):
     setup_logging_stack_traces()
     tf.compat.v1.enable_v2_behavior()
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
+
+    if FLAGS.list_env:
+      print("Listing available gym environments:")
+      print("gym -- all available environments:")
+      for env_spec in gym.envs.registration.registry.all():
+        print(f"  {env_spec.id}")
+      print("gym -- pybullet environments:")
+      for env_spec in gym.envs.registration.registry.all():
+        if not re.search(r'Bullet', env_spec.id):
+          continue
+        print(f"  {env_spec.id}")
+      return
 
     # TODO: iterate over iml args and do this to fix:
     #     FLAGS['iml_directory'] = FLAGS['iml-directory']

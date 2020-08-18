@@ -14,18 +14,19 @@
 # limitations under the License.
 
 # Lint as: python2, python3
-r"""Train and Eval DDPG.
+r"""Train and Eval TD3.
 
 To run:
 
 ```bash
-tensorboard --logdir $HOME/tmp/ddpg/gym/HalfCheetah-v2/ --port 2223 &
+tensorboard --logdir $HOME/tmp/td3/gym/HalfCheetah-v2/ --port 2223 &
 
-python tf_agents/agents/ddpg/examples/v2/train_eval.py \
-  --root_dir=$HOME/tmp/ddpg/gym/HalfCheetah-v2/ \
+python tf_agents/agents/td3/examples/v2/train_eval.py \
+  --root_dir=$HOME/tmp/td3/gym/HalfCheetah-v2/ \
   --num_iterations=2000000 \
   --alsologtostderr
 ```
+
 """
 
 from __future__ import absolute_import
@@ -45,10 +46,9 @@ import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import actor_network
 from tf_agents.agents.ddpg import critic_network
-from tf_agents.agents.ddpg import ddpg_agent
+from tf_agents.agents.td3 import td3_agent
 from tf_agents.drivers import dynamic_step_driver
-from tf_agents.environments import parallel_py_environment
-from tf_agents.environments import suite_mujoco, suite_gym, suite_pybullet
+from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import tf_metrics
@@ -63,7 +63,6 @@ flags.DEFINE_integer('num_iterations', 100000,
 flags.DEFINE_multi_string('gin_file', None, 'Paths to the gin-config files.')
 flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
 
-
 FLAGS = flags.FLAGS
 
 
@@ -71,10 +70,6 @@ FLAGS = flags.FLAGS
 def train_eval(
     root_dir,
     env_name='HalfCheetah-v2',
-    eval_env_name=None,
-    env_load_fn=suite_mujoco.load,
-    # env_load_fn=suite_gym.load,
-    # env_load_fn=suite_pybullet.load,
     num_iterations=2000000,
     actor_fc_layers=(400, 300),
     critic_obs_fc_layers=(400,),
@@ -83,16 +78,15 @@ def train_eval(
     # Params for collect
     initial_collect_steps=1000,
     collect_steps_per_iteration=1,
-    num_parallel_environments=1,
     replay_buffer_capacity=100000,
-    ou_stddev=0.2,
-    ou_damping=0.15,
+    exploration_noise_std=0.1,
     # Params for target update
     target_update_tau=0.05,
     target_update_period=5,
     # Params for train
     train_steps_per_iteration=1,
     batch_size=64,
+    actor_update_period=2,
     actor_learning_rate=1e-4,
     critic_learning_rate=1e-3,
     dqda_clipping=None,
@@ -112,7 +106,7 @@ def train_eval(
     summarize_grads_and_vars=False,
     eval_metrics_callback=None):
 
-  """A simple train and eval for DDPG."""
+  """A simple train and eval for TD3."""
   root_dir = os.path.expanduser(root_dir)
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
@@ -131,14 +125,8 @@ def train_eval(
   global_step = tf.compat.v1.train.get_or_create_global_step()
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
-    if num_parallel_environments > 1:
-      tf_env = tf_py_environment.TFPyEnvironment(
-          parallel_py_environment.ParallelPyEnvironment(
-              [lambda: env_load_fn(env_name)] * num_parallel_environments))
-    else:
-      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
-    eval_env_name = eval_env_name or env_name
-    eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(eval_env_name))
+    tf_env = tf_py_environment.TFPyEnvironment(suite_mujoco.load(env_name))
+    eval_tf_env = tf_py_environment.TFPyEnvironment(suite_mujoco.load(env_name))
 
     actor_net = actor_network.ActorNetwork(
         tf_env.time_step_spec().observation,
@@ -156,7 +144,7 @@ def train_eval(
         joint_fc_layer_params=critic_joint_fc_layers,
     )
 
-    tf_agent = ddpg_agent.DdpgAgent(
+    tf_agent = td3_agent.Td3Agent(
         tf_env.time_step_spec(),
         tf_env.action_spec(),
         actor_network=actor_net,
@@ -165,10 +153,10 @@ def train_eval(
             learning_rate=actor_learning_rate),
         critic_optimizer=tf.compat.v1.train.AdamOptimizer(
             learning_rate=critic_learning_rate),
-        ou_stddev=ou_stddev,
-        ou_damping=ou_damping,
+        exploration_noise_std=exploration_noise_std,
         target_update_tau=target_update_tau,
         target_update_period=target_update_period,
+        actor_update_period=actor_update_period,
         dqda_clipping=dqda_clipping,
         td_errors_loss_fn=td_errors_loss_fn,
         gamma=gamma,
@@ -176,7 +164,8 @@ def train_eval(
         gradient_clipping=gradient_clipping,
         debug_summaries=debug_summaries,
         summarize_grads_and_vars=summarize_grads_and_vars,
-        train_step_counter=global_step)
+        train_step_counter=global_step,
+    )
     tf_agent.initialize()
 
     train_metrics = [
@@ -207,12 +196,9 @@ def train_eval(
         num_steps=collect_steps_per_iteration)
 
     if use_tf_functions:
-      logging.info("tf.function is ENABLED")
       initial_collect_driver.run = common.function(initial_collect_driver.run)
       collect_driver.run = common.function(collect_driver.run)
       tf_agent.train = common.function(tf_agent.train)
-    else:
-      logging.info("tf.function is DISABLED")
 
     # Collect initial replay data.
     logging.info(
@@ -299,6 +285,7 @@ def main(_):
   logging.set_verbosity(logging.INFO)
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
   train_eval(FLAGS.root_dir, num_iterations=FLAGS.num_iterations)
+
 
 if __name__ == '__main__':
   flags.mark_flag_as_required('root_dir')
