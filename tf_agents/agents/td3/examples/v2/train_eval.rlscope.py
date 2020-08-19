@@ -36,6 +36,8 @@ from __future__ import print_function
 import os
 import time
 
+import iml_profiler.api as iml
+
 from absl import app
 from absl import flags
 from absl import logging
@@ -53,7 +55,7 @@ from tf_agents.environments import tf_py_environment
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import tf_metrics
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.utils import common
+from tf_agents.utils import common, rlscope_common
 
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
@@ -62,6 +64,7 @@ flags.DEFINE_integer('num_iterations', 100000,
                      'Total number train/eval iterations to perform.')
 flags.DEFINE_multi_string('gin_file', None, 'Paths to the gin-config files.')
 flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
+flags.DEFINE_string('env_name', 'HalfCheetah-v2', 'Environment')
 
 FLAGS = flags.FLAGS
 
@@ -70,6 +73,7 @@ FLAGS = flags.FLAGS
 def train_eval(
     root_dir,
     env_name='HalfCheetah-v2',
+    # env_load_fn=suite_mujoco.load,
     num_iterations=2000000,
     actor_fc_layers=(400, 300),
     critic_obs_fc_layers=(400,),
@@ -111,6 +115,24 @@ def train_eval(
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
 
+  env_load_fn = rlscope_common.get_env_load_fn(env_name)
+
+  # Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+  # (hence, we run lots more iterations than DDPG/PPO).
+  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+
+  operations_available = set([
+    'train_step',
+    'collect_data',
+  ])
+  operations_seen = set([])
+  def iml_prof_operation(operation):
+    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
+
   train_summary_writer = tf.compat.v2.summary.create_file_writer(
       train_dir, flush_millis=summaries_flush_secs * 1000)
   train_summary_writer.set_as_default()
@@ -125,8 +147,8 @@ def train_eval(
   global_step = tf.compat.v1.train.get_or_create_global_step()
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
-    tf_env = tf_py_environment.TFPyEnvironment(suite_mujoco.load(env_name))
-    eval_tf_env = tf_py_environment.TFPyEnvironment(suite_mujoco.load(env_name))
+    tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+    eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
 
     actor_net = actor_network.ActorNetwork(
         tf_env.time_step_spec().observation,
@@ -239,31 +261,38 @@ def train_eval(
     if use_tf_functions:
       train_step = common.function(train_step)
 
-    for _ in range(num_iterations):
+    for iteration in range(num_iterations):
+
+      rlscope_common.before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available)
+
       start_time = time.time()
-      time_step, policy_state = collect_driver.run(
-          time_step=time_step,
-          policy_state=policy_state,
-      )
+      with iml_prof_operation('collect_data'):
+        time_step, policy_state = collect_driver.run(
+            time_step=time_step,
+            policy_state=policy_state,
+        )
       for _ in range(train_steps_per_iteration):
-        train_loss = train_step()
+        with iml_prof_operation('train_step'):
+          train_loss = train_step()
       time_acc += time.time() - start_time
 
-      if global_step.numpy() % log_interval == 0:
-        logging.info('step = %d, loss = %f', global_step.numpy(),
+      global_step_val = global_step.numpy()
+
+      if global_step_val % log_interval == 0:
+        logging.info('step = %d, loss = %f', global_step_val,
                      train_loss.loss)
-        steps_per_sec = (global_step.numpy() - timed_at_step) / time_acc
+        steps_per_sec = (global_step_val - timed_at_step) / time_acc
         logging.info('%.3f steps/sec', steps_per_sec)
         tf.compat.v2.summary.scalar(
             name='global_steps_per_sec', data=steps_per_sec, step=global_step)
-        timed_at_step = global_step.numpy()
+        timed_at_step = global_step_val
         time_acc = 0
 
       for train_metric in train_metrics:
         train_metric.tf_summaries(
             train_step=global_step, step_metrics=train_metrics[:2])
 
-      if global_step.numpy() % eval_interval == 0:
+      if global_step_val % eval_interval == 0:
         results = metric_utils.eager_compute(
             eval_metrics,
             eval_tf_env,
@@ -274,7 +303,7 @@ def train_eval(
             summary_prefix='Metrics',
         )
         if eval_metrics_callback is not None:
-          eval_metrics_callback(results, global_step.numpy())
+          eval_metrics_callback(results, global_step_val)
         metric_utils.log_metrics(eval_metrics)
 
     return train_loss
@@ -284,9 +313,27 @@ def main(_):
   tf.compat.v1.enable_v2_behavior()
   logging.set_verbosity(logging.INFO)
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
-  train_eval(FLAGS.root_dir, num_iterations=FLAGS.num_iterations)
+
+  algo = 'td3'
+  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  process_name = f'{algo}_train_eval'
+  phase_name = process_name
+
+  # RLScope: Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # Roughly 1 minute when running --config time-breakdown
+  iml.prof.set_max_passes(2500, skip_if_set=True)
+  # 1 configuration pass.
+  iml.prof.set_delay_passes(10, skip_if_set=True)
+
+  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+    train_eval(
+      root_dir,
+      num_iterations=FLAGS.num_iterations,
+      env_name=FLAGS.env_name)
 
 
 if __name__ == '__main__':
-  flags.mark_flag_as_required('root_dir')
+  # flags.mark_flag_as_required('root_dir')
   app.run(main)

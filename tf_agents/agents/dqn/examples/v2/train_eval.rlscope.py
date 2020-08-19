@@ -74,7 +74,7 @@ from tf_agents.networks import q_network
 from tf_agents.networks import q_rnn_network
 from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.utils import common
+from tf_agents.utils import common, rlscope_common
 
 import gym
 
@@ -87,107 +87,9 @@ flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
 flags.DEFINE_bool('use_tensorboard', False, 'Record autograph as graph viewable in tensorboard at --logdir=<--root_dir>/train')
 flags.DEFINE_bool('python_mode', False, 'Run everything eagerly from python (disable autograph)')
 flags.DEFINE_bool('use_tf_functions', True, 'Use tf.function on tf_agent.train and driver.run')
-flags.DEFINE_integer('log_stacktrace_freq', None, 'Dump stack traces from logged calls (e.g., calling into C++ TensorFlow API)')
 flags.DEFINE_string('env_name', 'CartPole-v0', 'Environment')
-flags.DEFINE_bool('list_env', False, 'List available Environments')
-
-iml.add_iml_arguments(flags)
-# iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
 
 FLAGS = flags.FLAGS
-
-# Intercept tf.Session.run(...) calls to see when calls to TensorFlow graph computations are made.
-#
-# Never called with --python-mode...
-
-def print_indent(ss, indent):
-  if indent == 0 or indent is None:
-    return
-  ss.write('  '*indent)
-
-def with_indent(txt, indent):
-  if indent == 0 or indent is None:
-    return txt
-  return textwrap.indent(txt, prefix='  '*indent)
-
-class LoggedStackTrace:
-  def __init__(self, name, format_stack):
-    self.name = name
-    self.format_stack = format_stack
-    self.num_calls = 0
-    self.printed = False
-
-  def add_call(self):
-    self.num_calls += 1
-    self.printed = False
-
-  def print(self, ss, skip_last=0, indent=0):
-    keep_stack = self.format_stack[:len(self.format_stack)-skip_last]
-    ss.write(with_indent(''.join(keep_stack), indent))
-    self.printed = True
-
-class _LoggedStackTraces:
-  def __init__(self):
-    # traceback.format_stack() ->
-    self.stacktraces = dict()
-
-  def _key(self, name, format_stack):
-    return tuple(format_stack)
-
-  def log_call(self, name, format_stack):
-    key = self._key(name, format_stack)
-    stacktrace = self.stacktraces.get(key, None)
-    if stacktrace is None:
-      stacktrace = LoggedStackTrace(name, format_stack)
-      self.stacktraces[key] = stacktrace
-    stacktrace.add_call()
-
-  def print(self, ss, skip_last=0, indent=0):
-    # Only print stacktraces for functions that have been called since we last printed.
-    stacktraces = [st for st in self.stacktraces.values() if not st.printed]
-    # Sort by number of calls
-    stacktraces.sort(key=lambda st: (st.num_calls, st.name))
-    print_indent(ss, indent)
-    ss.write("Stacktraces ordered by number of calls (since last printed)\n")
-    for i, st in enumerate(stacktraces):
-      print_indent(ss, indent+1)
-      ss.write("Stacktrace[{i}] num_calls={num_calls}: {name}\n".format(
-        i=i,
-        num_calls=st.num_calls,
-        name=st.name,
-      ))
-      st.print(ss, indent=indent+2, skip_last=skip_last)
-
-
-LoggedStackTraces = None
-def setup_logging_stack_traces():
-  global LoggedStackTraces
-  WRAP_TF_SESSION_RUN = FLAGS.log_stacktrace_freq is not None
-  if WRAP_TF_SESSION_RUN:
-    LoggedStackTraces = _LoggedStackTraces()
-
-    def log_call(func, name, *args, **kwargs):
-      if LoggedStackTraces is not None:
-        stack = traceback.format_stack()
-        LoggedStackTraces.log_call(name, stack)
-      return func(*args, **kwargs)
-
-    original_tf_Session_run = tf.compat.v1.Session.run
-    def wrapped_tf_Session_run(self, fetches, feed_dict=None, options=None, run_metadata=None):
-      return log_call(original_tf_Session_run, "tf.Session.run", self, fetches, feed_dict=feed_dict, options=options, run_metadata=run_metadata)
-    tf.compat.v1.Session.run = wrapped_tf_Session_run
-
-    from tensorflow.python import pywrap_tfe
-
-    original_pywrap_tfe_TFE_Py_Execute = pywrap_tfe.TFE_Py_Execute
-    def wrapped_pywrap_tfe_TFE_Py_Execute(*args, **kwargs):
-      return log_call(original_pywrap_tfe_TFE_Py_Execute, "TFE_Py_Execute", *args, **kwargs)
-    pywrap_tfe.TFE_Py_Execute = wrapped_pywrap_tfe_TFE_Py_Execute
-
-    original_pywrap_tfe_TFE_Py_FastPathExecute = pywrap_tfe.TFE_Py_FastPathExecute
-    def wrapped_pywrap_tfe_TFE_Py_FastPathExecute(*args, **kwargs):
-      return log_call(original_pywrap_tfe_TFE_Py_FastPathExecute, "TFE_Py_FastPathExecute", *args, **kwargs)
-    pywrap_tfe.TFE_Py_FastPathExecute = wrapped_pywrap_tfe_TFE_Py_FastPathExecute
 
 @gin.configurable
 def train_eval(
@@ -240,23 +142,12 @@ def train_eval(
     eval_metrics_callback=None,
     use_tensorboard=False,
     python_mode=False,
-    log_stacktrace_freq=None,
+    # log_stacktrace_freq=None,
 ):
   """A simple train and eval for DQN."""
   root_dir = os.path.expanduser(root_dir)
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
-
-  # Set some default trace-collection termination conditions (if not set via the cmdline).
-  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
-  #
-  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
-  # (hence, we run lots more iterations than DDPG/PPO).
-  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
-  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
-  iml.prof.set_max_passes(10, skip_if_set=True)
-  # 1 configuration pass.
-  iml.prof.set_delay_passes(1, skip_if_set=True)
 
   operations_available = set([
     'train_step',
@@ -267,11 +158,7 @@ def train_eval(
   ])
   operations_seen = set([])
   def iml_prof_operation(operation):
-    should_skip = operation not in operations_available
-    op = iml.prof.operation(operation, skip=should_skip)
-    if not should_skip:
-      operations_seen.add(operation)
-    return op
+    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
 
   if python_mode:
     # NOTE: this is even WORSE than TF v1 stable-baselines.  With stable-baselines, at least the forward and backward
@@ -438,62 +325,16 @@ def train_eval(
     iterator = iter(dataset)
 
     def train_step():
-      # experience, _ = next(iterator)
-      # trace = use_tensorboard and iteration == 0 and train_iteration == 0
-      # trace_name = 'tf_agent.train(experience)'
-      # if trace:
-      #     logging.info(f"TRACE: {trace_name}")
-      # return with_summary_trace(
-      #     lambda: tf_agent.train(experience),
-      #     trace_name,
-      #     train_dir,
-      #     trace=trace,
-      #     step=iteration*train_steps_per_iteration + train_iteration,
-      #     writer=train_summary_writer)
       experience, _ = next(iterator)
       return tf_agent.train(experience)
 
     if use_tf_functions:
       train_step = common.function(train_step)
 
-    def iml_is_warmed_up(operations_seen, operations_available):
-      """
-      Return true once we are executing the full training-loop.
-
-      :return:
-      """
-      assert operations_seen.issubset(operations_available)
-      # can_sample = replay_buffer.can_sample(batch_size)
-      # return can_sample and operations_seen == operations_available and num_timesteps > learning_starts
-      return operations_seen == operations_available
 
     for iteration in range(num_iterations):
 
-      if iml.prof.delay and iml_is_warmed_up(operations_seen, operations_available) and not iml.prof.tracing_enabled:
-        # Entire training loop is now running; enable IML tracing
-        iml.prof.enable_tracing()
-
-      # GOAL: we only want to call report_progress once we've seen ALL the operations run
-      # (i.e., q_backward, q_update_target_network).  This will ensure that the GPU HW sampler
-      # will see ALL the possible GPU operations.
-      if iml.prof.debug:
-        iml.logger.info(textwrap.dedent("""\
-        RLS: @ t={iteration}: operations_seen = {operations_seen}
-          waiting for = {waiting_for}
-        """.format(
-          iteration=iteration,
-          operations_seen=operations_seen,
-          waiting_for=operations_available.difference(operations_seen),
-        )).rstrip())
-      if operations_seen == operations_available:
-        operations_seen.clear()
-        iml.prof.report_progress(
-          percent_complete=iteration/float(num_iterations),
-          num_timesteps=iteration,
-          total_timesteps=num_iterations)
-
-      if log_stacktrace_freq is not None and iteration % log_stacktrace_freq == 0:
-        log_stacktraces()
+      rlscope_common.before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available)
 
       start_time = time.time()
 
@@ -625,76 +466,33 @@ def with_summary_trace(func, name, logdir, trace, step=0, graph=True, profiler=T
 
 
 def main(_):
-  try:
-    logging.set_verbosity(logging.INFO)
-    setup_logging_stack_traces()
-    tf.compat.v1.enable_v2_behavior()
-    gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
+  logging.set_verbosity(logging.INFO)
+  tf.compat.v1.enable_v2_behavior()
+  gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
-    if FLAGS.list_env:
-      print("Listing available gym environments:")
-      print("gym -- all available environments:")
-      for env_spec in gym.envs.registration.registry.all():
-        print(f"  {env_spec.id}")
-      print("gym -- pybullet environments:")
-      for env_spec in gym.envs.registration.registry.all():
-        if not re.search(r'Bullet', env_spec.id):
-          continue
-        print(f"  {env_spec.id}")
-      return
+  algo = 'dqn'
+  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  process_name = f'{algo}_train_eval'
+  phase_name = process_name
 
-    # TODO: iterate over iml args and do this to fix:
-    #     FLAGS['iml_directory'] = FLAGS['iml-directory']
-    iml.fix_gflags_iml_args(FLAGS)
+  # RLScope: Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # Roughly 1 minute when running --config time-breakdown
+  iml.prof.set_max_passes(2500, skip_if_set=True)
+  # 1 configuration pass.
+  iml.prof.set_delay_passes(10, skip_if_set=True)
 
-    if ( FLAGS.iml_directory is None and FLAGS.root_dir is None ) or \
-        ( FLAGS.iml_directory is not None and FLAGS.root_dir is not None ):
-      print(FLAGS.get_help(), file=sys.stderr)
-      logging.error("Need --root-dir or --iml-directory")
-      sys.exit(1)
-
-    # logging.info(pprint.pformat({
-    #   'FLAGS.iml_directory': FLAGS.iml_directory,
-    #   'FLAGS.root_dir': FLAGS.root_dir,
-    # }))
-
-    if FLAGS.iml_directory is not None:
-      root_dir = os.path.join(FLAGS.iml_directory, 'train_eval')
-      iml_directory = os.path.join(FLAGS.iml_directory, 'iml')
-    else:
-      assert FLAGS.root_dir is not None
-      root_dir = os.path.join(FLAGS.root_dir, 'train_eval')
-      iml_directory = os.path.join(FLAGS.root_dir, 'iml')
-
-    iml.handle_gflags_iml_args(FLAGS, directory=iml_directory, reports_progress=True)
-    iml.prof.set_metadata({
-      'algo': 'dqn',
-      'env': FLAGS.env_name,
-    })
-
-    process_name = 'dqn_train_eval'
-    phase_name = process_name
-    with iml.prof.profile(process_name=process_name, phase_name=phase_name):
-      train_eval(
-        root_dir,
-        env_name=FLAGS.env_name,
-        num_iterations=FLAGS.num_iterations,
-        use_tf_functions=FLAGS.use_tf_functions,
-        use_tensorboard=FLAGS.use_tensorboard,
-        python_mode=FLAGS.python_mode,
-        log_stacktrace_freq=FLAGS.log_stacktrace_freq)
-
-  finally:
-    log_stacktraces()
-
-def log_stacktraces():
-  if LoggedStackTraces is not None:
-    ss = StringIO()
-    # stack[-1] = Call to "traceback.format_stack()"
-    # stack[-2] = Call to "return log_call(...)"
-    LoggedStackTraces.print(ss, skip_last=2, indent=0)
-    logging.info(ss.getvalue().rstrip())
-
+  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+    train_eval(
+      root_dir,
+      env_name=FLAGS.env_name,
+      num_iterations=FLAGS.num_iterations,
+      use_tf_functions=FLAGS.use_tf_functions,
+      use_tensorboard=FLAGS.use_tensorboard,
+      python_mode=FLAGS.python_mode,
+      # log_stacktrace_freq=FLAGS.log_stacktrace_freq,
+    )
 
 if __name__ == '__main__':
   # flags.mark_flag_as_required('root_dir')

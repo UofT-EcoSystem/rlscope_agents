@@ -33,6 +33,8 @@ from __future__ import print_function
 import os
 import time
 
+import iml_profiler.api as iml
+
 from absl import app
 from absl import flags
 from absl import logging
@@ -53,7 +55,7 @@ from tf_agents.networks import value_network
 from tf_agents.networks import value_rnn_network
 from tf_agents.policies import policy_saver
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.utils import common
+from tf_agents.utils import common, rlscope_common
 
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
@@ -61,7 +63,9 @@ flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
 flags.DEFINE_string('env_name', 'HalfCheetah-v2', 'Name of an environment')
 flags.DEFINE_integer('replay_buffer_capacity', 1001,
                      'Replay buffer capacity per env.')
-flags.DEFINE_integer('num_parallel_environments', 30,
+flags.DEFINE_integer('num_parallel_environments',
+                     # 30,
+                     1,
                      'Number of environments to run in parallel')
 flags.DEFINE_integer('num_environment_steps', 25000000,
                      'Number of environment steps to run before finishing.')
@@ -83,7 +87,7 @@ FLAGS = flags.FLAGS
 def train_eval(
     root_dir,
     env_name='HalfCheetah-v2',
-    env_load_fn=suite_mujoco.load,
+    # env_load_fn=suite_mujoco.load,
     random_seed=None,
     # TODO(b/127576522): rename to policy_fc_layers.
     actor_fc_layers=(200, 100),
@@ -106,7 +110,8 @@ def train_eval(
     log_interval=50,
     summary_interval=50,
     summaries_flush_secs=1,
-    use_tf_functions=True,
+    # use_tf_functions=True,
+    use_tf_functions=False,
     debug_summaries=False,
     summarize_grads_and_vars=False):
   """A simple train and eval for PPO."""
@@ -117,6 +122,24 @@ def train_eval(
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
   saved_model_dir = os.path.join(root_dir, 'policy_saved_model')
+
+  env_load_fn = rlscope_common.get_env_load_fn(env_name)
+
+  # Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+  # (hence, we run lots more iterations than DDPG/PPO).
+  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+
+  operations_available = set([
+    'train_step',
+    'collect_data',
+  ])
+  operations_seen = set([])
+  def iml_prof_operation(operation):
+    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
 
   train_summary_writer = tf.compat.v2.summary.create_file_writer(
       train_dir, flush_millis=summaries_flush_secs * 1000)
@@ -135,9 +158,16 @@ def train_eval(
     if random_seed is not None:
       tf.compat.v1.set_random_seed(random_seed)
     eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
-    tf_env = tf_py_environment.TFPyEnvironment(
+    # tf_env = tf_py_environment.TFPyEnvironment(
+    #     parallel_py_environment.ParallelPyEnvironment(
+    #         [lambda: env_load_fn(env_name)] * num_parallel_environments))
+    if num_parallel_environments > 1:
+      tf_env = tf_py_environment.TFPyEnvironment(
         parallel_py_environment.ParallelPyEnvironment(
-            [lambda: env_load_fn(env_name)] * num_parallel_environments))
+          [lambda: env_load_fn(env_name)] * num_parallel_environments))
+    else:
+      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+
     optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
     if use_rnns:
@@ -233,7 +263,14 @@ def train_eval(
     train_time = 0
     timed_at_step = global_step.numpy()
 
-    while environment_steps_metric.result() < num_environment_steps:
+    def get_steps():
+      return environment_steps_metric.result()
+
+    steps = get_steps()
+    while steps < num_environment_steps:
+
+      rlscope_common.before_each_iteration(FLAGS, steps, num_environment_steps, operations_seen, operations_available)
+
       global_step_val = global_step.numpy()
       if global_step_val % eval_interval == 0:
         metric_utils.eager_compute(
@@ -247,11 +284,13 @@ def train_eval(
         )
 
       start_time = time.time()
-      collect_driver.run()
+      with iml_prof_operation('collect_data'):
+        collect_driver.run()
       collect_time += time.time() - start_time
 
       start_time = time.time()
-      total_loss, _ = train_step()
+      with iml_prof_operation('train_step'):
+        total_loss, _ = train_step()
       replay_buffer.clear()
       train_time += time.time() - start_time
 
@@ -282,6 +321,7 @@ def train_eval(
         timed_at_step = global_step_val
         collect_time = 0
         train_time = 0
+        steps = get_steps()
 
     # One final eval before exiting.
     metric_utils.eager_compute(
@@ -298,18 +338,33 @@ def train_eval(
 def main(_):
   logging.set_verbosity(logging.INFO)
   tf.compat.v1.enable_v2_behavior()
-  train_eval(
-      FLAGS.root_dir,
-      env_name=FLAGS.env_name,
-      use_rnns=FLAGS.use_rnns,
-      num_environment_steps=FLAGS.num_environment_steps,
-      collect_episodes_per_iteration=FLAGS.collect_episodes_per_iteration,
-      num_parallel_environments=FLAGS.num_parallel_environments,
-      replay_buffer_capacity=FLAGS.replay_buffer_capacity,
-      num_epochs=FLAGS.num_epochs,
-      num_eval_episodes=FLAGS.num_eval_episodes)
+
+  algo = 'ppo'
+  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  process_name = f'{algo}_train_eval'
+  phase_name = process_name
+
+  # RLScope: Set some default trace-collection termination conditions (if not set via the cmdline).
+  # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
+  #
+  # Roughly 1 minute when running --config time-breakdown
+  iml.prof.set_max_passes(2500, skip_if_set=True)
+  # 1 configuration pass.
+  iml.prof.set_delay_passes(10, skip_if_set=True)
+
+  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+    train_eval(
+        root_dir,
+        env_name=FLAGS.env_name,
+        use_rnns=FLAGS.use_rnns,
+        num_environment_steps=FLAGS.num_environment_steps,
+        collect_episodes_per_iteration=FLAGS.collect_episodes_per_iteration,
+        num_parallel_environments=FLAGS.num_parallel_environments,
+        replay_buffer_capacity=FLAGS.replay_buffer_capacity,
+        num_epochs=FLAGS.num_epochs,
+        num_eval_episodes=FLAGS.num_eval_episodes)
 
 
 if __name__ == '__main__':
-  flags.mark_flag_as_required('root_dir')
+  # flags.mark_flag_as_required('root_dir')
   app.run(main)
