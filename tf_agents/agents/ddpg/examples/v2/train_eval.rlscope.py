@@ -130,6 +130,8 @@ def train_eval(
   operations_available = set([
     'train_step',
     'collect_data',
+    # NOTE: This is called on every iteration... but we don't see it since its through a weird C++ -> Python callback.
+    # 'step',
   ])
   operations_seen = set([])
   def iml_prof_operation(operation):
@@ -152,9 +154,11 @@ def train_eval(
     if num_parallel_environments > 1:
       tf_env = tf_py_environment.TFPyEnvironment(
           parallel_py_environment.ParallelPyEnvironment(
-              [lambda: env_load_fn(env_name)] * num_parallel_environments))
+              [lambda: env_load_fn(env_name)] * num_parallel_environments),
+        # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
+        iml_enabled=True)
     else:
-      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), iml_enabled=True)
     eval_env_name = eval_env_name or env_name
     eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(eval_env_name))
 
