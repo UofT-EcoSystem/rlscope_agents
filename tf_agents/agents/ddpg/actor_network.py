@@ -35,6 +35,7 @@ class ActorNetwork(network.Network):
   def __init__(self,
                input_tensor_spec,
                output_tensor_spec,
+               # actor_fc_layers = (400, 300)
                fc_layer_params=None,
                dropout_layer_params=None,
                conv_layer_params=None,

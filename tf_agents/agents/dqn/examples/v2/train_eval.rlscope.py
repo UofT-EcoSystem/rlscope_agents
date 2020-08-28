@@ -86,7 +86,6 @@ flags.DEFINE_multi_string('gin_file', None, 'Paths to the gin-config files.')
 flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
 flags.DEFINE_bool('use_tensorboard', False, 'Record autograph as graph viewable in tensorboard at --logdir=<--root_dir>/train')
 flags.DEFINE_bool('python_mode', False, 'Run everything eagerly from python (disable autograph)')
-flags.DEFINE_bool('use_tf_functions', True, 'Use tf.function on tf_agent.train and driver.run')
 flags.DEFINE_string('env_name', 'CartPole-v0', 'Environment')
 
 FLAGS = flags.FLAGS
@@ -471,7 +470,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'dqn'
-  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -486,12 +485,10 @@ def main(_):
   with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
       root_dir,
-      env_name=FLAGS.env_name,
-      num_iterations=FLAGS.num_iterations,
-      use_tf_functions=FLAGS.use_tf_functions,
       use_tensorboard=FLAGS.use_tensorboard,
       python_mode=FLAGS.python_mode,
       # log_stacktrace_freq=FLAGS.log_stacktrace_freq,
+      **train_eval_kwargs,
     )
 
 if __name__ == '__main__':

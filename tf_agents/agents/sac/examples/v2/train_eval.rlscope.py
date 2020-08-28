@@ -67,6 +67,8 @@ flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
 flags.DEFINE_multi_string('gin_file', None, 'Path to the trainer config files.')
 flags.DEFINE_multi_string('gin_param', None, 'Gin binding to pass through.')
 flags.DEFINE_string('env_name', 'HalfCheetah-v2', 'Name of an environment')
+flags.DEFINE_integer('num_iterations', 3000000,
+                     'Total number train/eval iterations to perform.')
 
 FLAGS = flags.FLAGS
 
@@ -362,7 +364,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'sac'
-  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -377,7 +379,7 @@ def main(_):
   with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
       root_dir,
-      env_name=FLAGS.env_name)
+      **train_eval_kwargs)
 
 if __name__ == '__main__':
   # flags.mark_flag_as_required('root_dir')

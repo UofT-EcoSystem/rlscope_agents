@@ -76,9 +76,13 @@ def train_eval(
     env_name='HalfCheetah-v2',
     eval_env_name=None,
     num_iterations=2000000,
+    # ActorNetwork: Action layers
     actor_fc_layers=(400, 300),
+    # CriticNetwork: Observation layers
     critic_obs_fc_layers=(400,),
+    # CriticNetwork: Action layers...? again? Not used currently
     critic_action_fc_layers=None,
+    # CriticNetwork: AFTER merging action and observation layers.
     critic_joint_fc_layers=(300,),
     # Params for collect
     initial_collect_steps=1000,
@@ -264,6 +268,7 @@ def train_eval(
     time_acc = 0
 
     # Dataset generates trajectories with shape [Bx2x...]
+    logging.info(f"BATCH_SIZE = {batch_size}")
     dataset = replay_buffer.as_dataset(
         num_parallel_calls=3,
         sample_batch_size=batch_size,
@@ -276,6 +281,11 @@ def train_eval(
 
     if use_tf_functions:
       train_step = common.function(train_step)
+
+    # For some reason, "step" gets called >= 100 times for collect_steps_per_iteration=100.
+    # Seems to be less than 200 usually.
+    # I'm assuming that this is because environment will terminate and get reset() multiple times causing extra steps.
+    iml.prof.set_max_operations('step', collect_steps_per_iteration*2)
 
     for iteration in range(num_iterations):
 
@@ -331,7 +341,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'ddpg'
-  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -339,14 +349,22 @@ def main(_):
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
   # Roughly 1 minute when running --config time-breakdown
-  iml.prof.set_max_passes(2500, skip_if_set=True)
-  # 1 configuration pass.
-  iml.prof.set_delay_passes(10, skip_if_set=True)
+
+  if FLAGS.stable_baselines_hyperparams:
+    # stable-baselines does 100 [Inference, Simulator] steps per pass,
+    # and 50 train_step per pass,
+    # so scale down the number of passes to keep it close to 1 minute.
+    iml.prof.set_max_passes(25, skip_if_set=True)
+    # 1 configuration pass.
+    iml.prof.set_delay_passes(3, skip_if_set=True)
+  else:
+    iml.prof.set_max_passes(2500, skip_if_set=True)
+    # 1 configuration pass.
+    iml.prof.set_delay_passes(10, skip_if_set=True)
 
   with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(root_dir,
-               num_iterations=FLAGS.num_iterations,
-               env_name=FLAGS.env_name)
+               **train_eval_kwargs)
 
 if __name__ == '__main__':
   # flags.mark_flag_as_required('root_dir')

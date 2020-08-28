@@ -339,6 +339,8 @@ def main(_):
   logging.set_verbosity(logging.INFO)
   tf.compat.v1.enable_v2_behavior()
 
+  raise NotImplementedError("PPO doesn't work (for now)")
+
   algo = 'ppo'
   root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'

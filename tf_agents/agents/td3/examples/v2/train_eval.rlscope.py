@@ -315,7 +315,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'td3'
-  root_dir, iml_directory = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -330,8 +330,7 @@ def main(_):
   with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
       root_dir,
-      num_iterations=FLAGS.num_iterations,
-      env_name=FLAGS.env_name)
+      **train_eval_kwargs)
 
 
 if __name__ == '__main__':

@@ -29,10 +29,13 @@ class CriticNetwork(network.Network):
   def __init__(self,
                input_tensor_spec,
                observation_conv_layer_params=None,
+               # critic_obs_fc_layers = (400,)
                observation_fc_layer_params=None,
                observation_dropout_layer_params=None,
+               # critic_action_fc_layers = None
                action_fc_layer_params=None,
                action_dropout_layer_params=None,
+               # critic_joint_fc_layers = (300,)
                joint_fc_layer_params=None,
                joint_dropout_layer_params=None,
                activation_fn=tf.nn.relu,
