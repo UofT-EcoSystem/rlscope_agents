@@ -266,6 +266,13 @@ def before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, ope
       percent_complete=iteration/float(num_iterations),
       num_timesteps=iteration,
       total_timesteps=num_iterations)
+    if iml.prof.tracing_enabled:
+      iml.logger.info(textwrap.dedent("""\
+        RLS: @ t={iteration}: PASS {pass_idx}
+        """.format(
+        pass_idx=iml.prof.pass_idx,
+        iteration=iteration,
+      )).rstrip())
 
     if FLAGS.log_stacktrace_freq is not None and iteration % FLAGS.log_stacktrace_freq == 0:
       log_stacktraces()
@@ -379,6 +386,9 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
     # NOTE: match the behaviour of stable-baselines, where "n_timesteps" in the DDPG implementation refers
     # to the number of [Inference, Simulator] "steps" we perform, NOT the number of gradient updates (i..e, train_step calls).
     tf_agents_params['num_iterations'] = int(zoo_params['hyperparams']['n_timesteps']) // model.nb_rollout_steps
+    tf_agents_params['replay_buffer_capacity'] = model.buffer_size
+    tf_agents_params['gamma'] = model.gamma
+
     policy = model.policy_tf
     if policy.feature_extraction == 'mlp':
       tf_agents_params['critic_obs_fc_layers'] = policy.layers
@@ -389,6 +399,42 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
     else:
       # elif model.feature_extractor == 'cnn':
       raise NotImplementedError(f"Not sure how to load tf-agents hyperparameters from rl-baselines-zoo/stable-baselines parameters for algo={algo}, feature_extractor={model.feature_extractor}")
+
+  elif algo == 'td3':
+
+    # # 128 is default in stable-baselines DDPG class.
+    tf_agents_params['batch_size'] = zoo_params['model'].batch_size
+    # stable-baselines uses same learning rate for all networks.
+    learning_rate = float(zoo_params['hyperparams'].get('learning_rate', 3e-4))
+    tf_agents_params['actor_learning_rate'] = learning_rate
+    tf_agents_params['critic_learning_rate'] = learning_rate
+    tf_agents_params['num_parallel_environments'] = zoo_params['hyperparams'].get('n_envs', 1)
+
+    model = zoo_params['model']
+    # Q: Whats the num_iteratsion?
+    tf_agents_params['collect_steps_per_iteration'] = model.train_freq
+    tf_agents_params['train_steps_per_iteration'] = model.gradient_steps
+    # stable-baselines always updates policy and target networks at the same time
+    # every policy_delay gradient update steps.
+    tf_agents_params['target_update_period'] = model.policy_delay
+    tf_agents_params['actor_update_period'] = model.policy_delay
+    tf_agents_params['target_update_tau'] = model.tau
+    if 'noise_std' in zoo_params['hyperparams']:
+      tf_agents_params['exploration_noise_std'] = zoo_params['hyperparams']['noise_std']
+    # NOTE: match the behaviour of stable-baselines, where "n_timesteps" in the TD3 implementation refers
+    # to the number of [Inference, Simulator] "steps" we perform, NOT the number of gradient updates (i..e, train_step calls).
+    tf_agents_params['num_iterations'] = int(zoo_params['hyperparams']['n_timesteps']) // model.train_freq
+    policy = model.policy_tf
+    if policy.feature_extraction == 'mlp':
+      tf_agents_params['critic_obs_fc_layers'] = policy.layers
+      tf_agents_params['critic_joint_fc_layers'] = policy.layers
+      tf_agents_params['critic_action_fc_layers'] = None
+      allow_none.add('critic_action_fc_layers')
+      tf_agents_params['actor_fc_layers'] = policy.layers
+    else:
+      # elif model.feature_extractor == 'cnn':
+      raise NotImplementedError(f"Not sure how to load tf-agents hyperparameters from rl-baselines-zoo/stable-baselines parameters for algo={algo}, feature_extractor={model.feature_extractor}")
+
 
   else:
     raise NotImplementedError(f"Not sure how to load tf-agents hyperparameters from rl-baselines-zoo/stable-baselines parameters for algo={algo}")

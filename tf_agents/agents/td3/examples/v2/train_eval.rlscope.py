@@ -50,6 +50,7 @@ from tf_agents.agents.ddpg import actor_network
 from tf_agents.agents.ddpg import critic_network
 from tf_agents.agents.td3 import td3_agent
 from tf_agents.drivers import dynamic_step_driver
+from tf_agents.environments import parallel_py_environment
 from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
 from tf_agents.eval import metric_utils
@@ -82,6 +83,7 @@ def train_eval(
     # Params for collect
     initial_collect_steps=1000,
     collect_steps_per_iteration=1,
+    num_parallel_environments=1,
     replay_buffer_capacity=100000,
     exploration_noise_std=0.1,
     # Params for target update
@@ -147,7 +149,15 @@ def train_eval(
   global_step = tf.compat.v1.train.get_or_create_global_step()
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
-    tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+    # tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+    if num_parallel_environments > 1:
+      tf_env = tf_py_environment.TFPyEnvironment(
+        parallel_py_environment.ParallelPyEnvironment(
+          [lambda: env_load_fn(env_name)] * num_parallel_environments),
+        # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
+        iml_enabled=True)
+    else:
+      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), iml_enabled=True)
     eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
 
     actor_net = actor_network.ActorNetwork(
@@ -261,6 +271,11 @@ def train_eval(
     if use_tf_functions:
       train_step = common.function(train_step)
 
+    # For some reason, "step" gets called >= 100 times for collect_steps_per_iteration=100.
+    # Seems to be less than 200 usually.
+    # I'm assuming that this is because environment will terminate and get reset() multiple times causing extra steps.
+    iml.prof.set_max_operations('step', collect_steps_per_iteration*2)
+
     for iteration in range(num_iterations):
 
       rlscope_common.before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available)
@@ -323,9 +338,18 @@ def main(_):
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
   # Roughly 1 minute when running --config time-breakdown
-  iml.prof.set_max_passes(2500, skip_if_set=True)
-  # 1 configuration pass.
-  iml.prof.set_delay_passes(10, skip_if_set=True)
+
+  if FLAGS.stable_baselines_hyperparams:
+    # stable-baselines does 100 [Inference, Simulator] steps per pass,
+    # and 50 train_step per pass,
+    # so scale down the number of passes to keep it close to 1 minute.
+    iml.prof.set_max_passes(5, skip_if_set=True)
+    # 1 configuration pass.
+    iml.prof.set_delay_passes(2, skip_if_set=True)
+  else:
+    iml.prof.set_max_passes(2500, skip_if_set=True)
+    # 1 configuration pass.
+    iml.prof.set_delay_passes(10, skip_if_set=True)
 
   with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
