@@ -419,6 +419,8 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
     tf_agents_params['target_update_period'] = model.policy_delay
     tf_agents_params['actor_update_period'] = model.policy_delay
     tf_agents_params['target_update_tau'] = model.tau
+    tf_agents_params['replay_buffer_capacity'] = model.buffer_size
+    tf_agents_params['gamma'] = model.gamma
     if 'noise_std' in zoo_params['hyperparams']:
       tf_agents_params['exploration_noise_std'] = zoo_params['hyperparams']['noise_std']
     # NOTE: match the behaviour of stable-baselines, where "n_timesteps" in the TD3 implementation refers
