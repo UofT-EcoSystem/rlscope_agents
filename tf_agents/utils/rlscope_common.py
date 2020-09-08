@@ -217,51 +217,30 @@ def log_stacktraces():
     LoggedStackTraces.print(ss, skip_last=2, indent=0)
     logging.info(ss.getvalue().rstrip())
 
-# operations_available = set([
-#   'train_step',
-#   'collect_data',
-#   # 'log_metrics',
-#   # 'eval_model',
-#   # 'sleep_1_sec',
-# ])
-# operations_seen = set([])
-def iml_prof_operation(operation, operations_seen, operations_available):
-  should_skip = operation not in operations_available
-  op = iml.prof.operation(operation, skip=should_skip)
-  if not should_skip:
-    operations_seen.add(operation)
-  return op
-
-def iml_is_warmed_up(operations_seen, operations_available):
-  """
-  Return true once we are executing the full training-loop.
-
-  :return:
-  """
-  assert operations_seen.issubset(operations_available)
-  # can_sample = replay_buffer.can_sample(batch_size)
-  # return can_sample and operations_seen == operations_available and num_timesteps > learning_starts
-  return operations_seen == operations_available
-
-def before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available):
-  if iml.prof.delay and iml_is_warmed_up(operations_seen, operations_available) and not iml.prof.tracing_enabled:
-    # Entire training loop is now running; enable IML tracing
-    iml.prof.enable_tracing()
-
+def before_each_iteration(iteration, num_iterations, is_warmed_up=None):
   # GOAL: we only want to call report_progress once we've seen ALL the operations run
   # (i.e., q_backward, q_update_target_network).  This will ensure that the GPU HW sampler
   # will see ALL the possible GPU operations.
+  waiting_for = OPERATIONS_AVAILABLE.difference(OPERATIONS_SEEN)
+  should_report_progress = len(waiting_for) == 0 and ( is_warmed_up is None or is_warmed_up )
+
+  if iml.prof.delay and should_report_progress and not iml.prof.tracing_enabled:
+    # Entire training loop is now running; enable IML tracing
+    iml.prof.enable_tracing()
+
   if iml.prof.debug:
     iml.logger.info(textwrap.dedent("""\
-        RLS: @ t={iteration}: operations_seen = {operations_seen}
+        RLS: @ t={iteration}: OPERATIONS_SEEN = {OPERATIONS_SEEN}
           waiting for = {waiting_for}
+          is_warmed_up = {is_warmed_up}
         """.format(
       iteration=iteration,
-      operations_seen=operations_seen,
-      waiting_for=operations_available.difference(operations_seen),
+      OPERATIONS_SEEN=OPERATIONS_SEEN,
+      waiting_for=waiting_for,
+      is_warmed_up=is_warmed_up,
     )).rstrip())
-  if operations_seen == operations_available:
-    operations_seen.clear()
+  if should_report_progress:
+    OPERATIONS_SEEN.clear()
     iml.prof.report_progress(
       percent_complete=iteration/float(num_iterations),
       num_timesteps=iteration,
@@ -274,8 +253,22 @@ def before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, ope
         iteration=iteration,
       )).rstrip())
 
-    if FLAGS.log_stacktrace_freq is not None and iteration % FLAGS.log_stacktrace_freq == 0:
-      log_stacktraces()
+    # if FLAGS.log_stacktrace_freq is not None and iteration % FLAGS.log_stacktrace_freq == 0:
+    #   log_stacktraces()
+
+OPERATIONS_SEEN = set()
+OPERATIONS_AVAILABLE = set()
+
+def iml_register_operations(operations):
+  for operation in operations:
+    OPERATIONS_AVAILABLE.add(operation)
+
+def iml_prof_operation(operation):
+  should_skip = operation not in OPERATIONS_AVAILABLE
+  op = iml.prof.operation(operation, skip=should_skip)
+  if not should_skip:
+    OPERATIONS_SEEN.add(operation)
+  return op
 
 """
 rl-baselines-zoo DDPG hyperparameters:
@@ -425,7 +418,19 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
       tf_agents_params['exploration_noise_std'] = zoo_params['hyperparams']['noise_std']
     # NOTE: match the behaviour of stable-baselines, where "n_timesteps" in the TD3 implementation refers
     # to the number of [Inference, Simulator] "steps" we perform, NOT the number of gradient updates (i..e, train_step calls).
-    tf_agents_params['num_iterations'] = int(zoo_params['hyperparams']['n_timesteps']) // model.train_freq
+    learning_starts = model.learning_starts
+    tf_agents_params['initial_collect_steps'] = learning_starts
+    # Q: Should we round up or down...?
+    # Basically, stable-baselines will continue until n_timesteps steps have been taken even if gradient updates remain.
+    # Hopefully, train_freq evenly divides.
+    # If it doesn't, total training time estimate may be over/undershoot for tf-agents.
+    # Round down:
+    # - assumes fewer training steps than stable-baselines
+    # Round up:
+    # - assumes greater training steps than stable-baselines
+    # We want both to do exact same number of equivalent operations.
+    assert ( int(zoo_params['hyperparams']['n_timesteps']) - learning_starts ) % model.train_freq == 0
+    tf_agents_params['num_iterations'] = ( int(zoo_params['hyperparams']['n_timesteps']) - learning_starts ) // model.train_freq
     policy = model.policy_tf
     if policy.feature_extraction == 'mlp':
       tf_agents_params['critic_obs_fc_layers'] = policy.layers
