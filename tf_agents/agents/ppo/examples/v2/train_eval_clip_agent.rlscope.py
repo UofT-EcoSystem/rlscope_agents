@@ -133,13 +133,10 @@ def train_eval(
   #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
   #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
 
-  operations_available = set([
+  rlscope_common.iml_register_operations({
     'train_step',
     'collect_data',
-  ])
-  operations_seen = set([])
-  def iml_prof_operation(operation):
-    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
+  })
 
   train_summary_writer = tf.compat.v2.summary.create_file_writer(
       train_dir, flush_millis=summaries_flush_secs * 1000)
@@ -269,7 +266,7 @@ def train_eval(
     steps = get_steps()
     while steps < num_environment_steps:
 
-      rlscope_common.before_each_iteration(FLAGS, steps, num_environment_steps, operations_seen, operations_available)
+      rlscope_common.before_each_iteration(steps, num_environment_steps)
 
       global_step_val = global_step.numpy()
       if global_step_val % eval_interval == 0:
@@ -284,12 +281,12 @@ def train_eval(
         )
 
       start_time = time.time()
-      with iml_prof_operation('collect_data'):
+      with rlscope_common.iml_prof_operation('collect_data'):
         collect_driver.run()
       collect_time += time.time() - start_time
 
       start_time = time.time()
-      with iml_prof_operation('train_step'):
+      with rlscope_common.iml_prof_operation('train_step'):
         total_loss, _ = train_step()
       replay_buffer.clear()
       train_time += time.time() - start_time

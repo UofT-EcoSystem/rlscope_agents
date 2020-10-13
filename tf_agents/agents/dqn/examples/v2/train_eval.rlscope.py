@@ -148,16 +148,13 @@ def train_eval(
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
 
-  operations_available = set([
+  rlscope_common.iml_register_operations({
     'train_step',
     'collect_data',
     # 'log_metrics',
     # 'eval_model',
     # 'sleep_1_sec',
-  ])
-  operations_seen = set([])
-  def iml_prof_operation(operation):
-    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
+  })
 
   if python_mode:
     # NOTE: this is even WORSE than TF v1 stable-baselines.  With stable-baselines, at least the forward and backward
@@ -333,7 +330,7 @@ def train_eval(
 
     for iteration in range(num_iterations):
 
-      rlscope_common.before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available)
+      rlscope_common.before_each_iteration(iteration, num_iterations)
 
       start_time = time.time()
 
@@ -342,7 +339,7 @@ def train_eval(
       trace_name = 'collect_driver.run'
       if trace:
           logging.info(f"TRACE: {trace_name}")
-      with iml_prof_operation('collect_data'):
+      with rlscope_common.iml_prof_operation('collect_data'):
         time_step, policy_state = with_summary_trace(
           lambda: collect_driver.run( # TFE_Py_Execute each loop iter
               time_step=time_step,
@@ -365,7 +362,7 @@ def train_eval(
         trace_name = 'tf_agent.train(experience)'
         if trace:
             logging.info(f"TRACE: {trace_name}")
-        with iml_prof_operation('train_step'):
+        with rlscope_common.iml_prof_operation('train_step'):
           train_loss = with_summary_trace(
               lambda: train_step(), # TFE_Py_Execute each loop iter
               trace_name,
@@ -386,13 +383,13 @@ def train_eval(
       # CONCERN: GPU operations may still be running if operations are queued to run asynchronously
       # and block only when results are queryed.
       #
-      # with iml_prof_operation('sleep_1_sec'):
+      # with rlscope_common.iml_prof_operation('sleep_1_sec'):
       #   time.sleep(1)
 
       global_step_value = None
       # Don't care about logging metrics for now.
       #
-      # with iml_prof_operation('log_metrics'):
+      # with rlscope_common.iml_prof_operation('log_metrics'):
       global_step_value = global_step.numpy()
 
       if global_step_value % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
@@ -423,7 +420,7 @@ def train_eval(
         # So, lets continue running eval_model, but ignore it's contribution to runtime
         # (which the code already does anyways when reporting steps per second).
         #
-        # with iml_prof_operation('eval_model'):
+        # with rlscope_common.iml_prof_operation('eval_model'):
         results = metric_utils.eager_compute(
             eval_metrics,
             eval_tf_env,

@@ -22,7 +22,7 @@ from __future__ import print_function
 import numpy as np
 from tf_agents.drivers import driver
 from tf_agents.trajectories import trajectory
-
+from tf_agents.utils import rlscope_common
 
 class PyDriver(driver.Driver):
   """A driver that runs a python policy in a python environment."""
@@ -78,8 +78,10 @@ class PyDriver(driver.Driver):
     num_steps = 0
     num_episodes = 0
     while num_steps < self._max_steps and num_episodes < self._max_episodes:
+      # with rlscope_common.iml_prof_operation('sample_action'):
       action_step = self.policy.action(time_step, policy_state)
-      next_time_step = self.env.step(action_step.action)
+      with rlscope_common.iml_prof_operation('step'):
+        next_time_step = self.env.step(action_step.action)
 
       traj = trajectory.from_transition(time_step, action_step, next_time_step)
       for observer in self._transition_observers:

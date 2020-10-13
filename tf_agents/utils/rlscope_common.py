@@ -382,6 +382,25 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
     tf_agents_params['replay_buffer_capacity'] = model.buffer_size
     tf_agents_params['gamma'] = model.gamma
 
+    # NOTE: match the behaviour of stable-baselines, where "n_timesteps" in the TD3 implementation refers
+    # to the number of [Inference, Simulator] "steps" we perform, NOT the number of gradient updates (i..e, train_step calls).
+    learning_starts = model.learning_starts
+    # learning_starts = 0
+    tf_agents_params['initial_collect_steps'] = learning_starts
+    # Q: Should we round up or down...?
+    # Basically, stable-baselines will continue until n_timesteps steps have been taken even if gradient updates remain.
+    # Hopefully, train_freq evenly divides.
+    # If it doesn't, total training time estimate may be over/undershoot for tf-agents.
+    # Round down:
+    # - assumes fewer training steps than stable-baselines
+    # Round up:
+    # - assumes greater training steps than stable-baselines
+    # We want both to do exact same number of equivalent operations.
+
+    # This WILL fail since it uses 128 for batch_size but 100 for rollout steps...
+    # assert ( int(zoo_params['hyperparams']['n_timesteps']) - learning_starts ) % model.nb_rollout_steps == 0
+    tf_agents_params['num_iterations'] = ( int(zoo_params['hyperparams']['n_timesteps']) - learning_starts ) // model.nb_rollout_steps
+
     policy = model.policy_tf
     if policy.feature_extraction == 'mlp':
       tf_agents_params['critic_obs_fc_layers'] = policy.layers

@@ -49,14 +49,17 @@ import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.agents.ddpg import actor_network
 from tf_agents.agents.ddpg import critic_network
 from tf_agents.agents.ddpg import ddpg_agent
-from tf_agents.drivers import dynamic_step_driver
+from tf_agents.drivers import dynamic_step_driver, py_driver
 from tf_agents.environments import parallel_py_environment
 from tf_agents.environments import suite_mujoco, suite_gym, suite_pybullet
 from tf_agents.environments import tf_py_environment
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import tf_metrics
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
+from tf_agents.replay_buffers import py_uniform_replay_buffer
 from tf_agents.utils import common, rlscope_common
+from tf_agents.specs import tensor_spec
+from tf_agents.policies import py_tf_policy
 
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
@@ -105,6 +108,8 @@ def train_eval(
     reward_scale_factor=1.0,
     gradient_clipping=None,
     use_tf_functions=True,
+    # use_tf_replay_buffer=True,
+    use_tf_replay_buffer=False,
     # Params for eval
     num_eval_episodes=10,
     eval_interval=10000,
@@ -149,23 +154,51 @@ def train_eval(
       tf_metrics.AverageEpisodeLengthMetric(buffer_size=num_eval_episodes)
   ]
 
+  def mk_env(env_name, allow_parallel=True):
+    if allow_parallel and num_parallel_environments > 1:
+      py_env = parallel_py_environment.ParallelPyEnvironment(
+        [lambda: env_load_fn(env_name)] * num_parallel_environments)
+    else:
+      py_env = env_load_fn(env_name)
+
+    if use_tf_replay_buffer:
+      if num_parallel_environments > 1:
+        tf_env = tf_py_environment.TFPyEnvironment(
+          py_env,
+          # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
+          iml_enabled=True)
+      else:
+        tf_env = tf_py_environment.TFPyEnvironment(py_env, iml_enabled=True)
+    else:
+      tf_env = py_env
+
+    return tf_env
+
+  def as_tf_spec(spec):
+    if use_tf_replay_buffer:
+      return spec
+    return tensor_spec.from_spec(spec)
+
+
   global_step = tf.compat.v1.train.get_or_create_global_step()
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
-    if num_parallel_environments > 1:
-      tf_env = tf_py_environment.TFPyEnvironment(
-          parallel_py_environment.ParallelPyEnvironment(
-              [lambda: env_load_fn(env_name)] * num_parallel_environments),
-        # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
-        iml_enabled=True)
-    else:
-      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), iml_enabled=True)
+    # if num_parallel_environments > 1:
+    #   tf_env = tf_py_environment.TFPyEnvironment(
+    #       parallel_py_environment.ParallelPyEnvironment(
+    #           [lambda: env_load_fn(env_name)] * num_parallel_environments),
+    #     # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
+    #     iml_enabled=True)
+    # else:
+    #   tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), iml_enabled=True)
     eval_env_name = eval_env_name or env_name
-    eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(eval_env_name))
+    # eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(eval_env_name))
+    tf_env = mk_env(env_name, allow_parallel=True)
+    eval_tf_env = mk_env(eval_env_name, allow_parallel=False)
 
     actor_net = actor_network.ActorNetwork(
-        tf_env.time_step_spec().observation,
-        tf_env.action_spec(),
+        as_tf_spec(tf_env.time_step_spec().observation),
+        as_tf_spec(tf_env.action_spec()),
         fc_layer_params=actor_fc_layers,
     )
 
@@ -173,15 +206,15 @@ def train_eval(
                               tf_env.action_spec())
 
     critic_net = critic_network.CriticNetwork(
-        critic_net_input_specs,
+        as_tf_spec(critic_net_input_specs),
         observation_fc_layer_params=critic_obs_fc_layers,
         action_fc_layer_params=critic_action_fc_layers,
         joint_fc_layer_params=critic_joint_fc_layers,
     )
 
     tf_agent = ddpg_agent.DdpgAgent(
-        tf_env.time_step_spec(),
-        tf_env.action_spec(),
+        as_tf_spec(tf_env.time_step_spec()),
+        as_tf_spec(tf_env.action_spec()),
         actor_network=actor_net,
         critic_network=critic_net,
         actor_optimizer=tf.compat.v1.train.AdamOptimizer(
@@ -212,22 +245,68 @@ def train_eval(
     eval_policy = tf_agent.policy
     collect_policy = tf_agent.collect_policy
 
-    replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
+    # assert tf_env.batch_size == batch_size
+
+    if not use_tf_replay_buffer:
+      eval_policy = py_tf_policy.PyTFPolicy(eval_policy, batch_size=tf_env.batch_size)
+      collect_policy = py_tf_policy.PyTFPolicy(collect_policy, batch_size=tf_env.batch_size)
+
+      # eval_policy._enable_functions = False
+      # assert not eval_policy._enable_functions
+      # collect_policy._enable_functions = False
+      # assert not collect_policy._enable_functions
+
+
+    if use_tf_replay_buffer:
+      replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         tf_agent.collect_data_spec,
         batch_size=tf_env.batch_size,
         max_length=replay_buffer_capacity)
+    else:
+      # spec = tf_agent.collect_data_spec
 
-    initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
-        tf_env,
-        collect_policy,
-        observers=[replay_buffer.add_batch],
-        num_steps=initial_collect_steps)
+      # This will convert from tf.int32 to np.dtype('int32'):
+      #   ipdb> spec
+      #   Trajectory(step_type=ArraySpec(shape=(), dtype=dtype('int32'), name='step_type'), observation=BoundedArraySpec(shape=(22,), dtype=dtype('float32'), name='observation', minimum=-3.4028234663852886e+38, maximum=3.4028234663852886e+38), action=BoundedArraySpec(shape=(6,), dtype=dtype('float32'), name='action', minimum=-1.0, maximum=1.0), policy_info=(), next_step_type=ArraySpec(shape=(), dtype=dtype('int32'), name='step_type'), reward=ArraySpec(shape=(), dtype=dtype('float32'), name='reward'), discount=BoundedArraySpec(shape=(), dtype=dtype('float32'), name='discount', minimum=0.0, maximum=1.0))
+      #   ipdb> tf_agent.collect_data_spec
+      #   Trajectory(step_type=TensorSpec(shape=(), dtype=tf.int32, name='step_type'), observation=BoundedTensorSpec(shape=(22,), dtype=tf.float32, name='observation', minimum=array(-3.4028235e+38, dtype=float32), maximum=array(3.4028235e+38, dtype=float32)), action=BoundedTensorSpec(shape=(6,), dtype=tf.float32, name='action', minimum=array(-1., dtype=float32), maximum=array(1., dtype=float32)), policy_info=(), next_step_type=TensorSpec(shape=(), dtype=tf.int32, name='step_type'), reward=TensorSpec(shape=(), dtype=tf.float32, name='reward'), discount=BoundedTensorSpec(shape=(), dtype=tf.float32, name='discount', minimum=array(0., dtype=float32), maximum=array(1., dtype=float32)))
 
-    collect_driver = dynamic_step_driver.DynamicStepDriver(
-        tf_env,
-        collect_policy,
-        observers=[replay_buffer.add_batch] + train_metrics,
-        num_steps=collect_steps_per_iteration)
+      spec = tensor_spec.to_nest_array_spec(tf_agent.collect_data_spec)
+      replay_buffer = py_uniform_replay_buffer.PyUniformReplayBuffer(
+        spec,
+        # tf_agent.collect_data_spec,
+        # batch_size=tf_env.batch_size,
+        capacity=replay_buffer_capacity)
+
+    def mk_driver(observers, max_steps):
+      if use_tf_replay_buffer:
+        driver = dynamic_step_driver.DynamicStepDriver(
+          tf_env,
+          collect_policy,
+          observers=observers,
+          num_steps=max_steps)
+      else:
+        driver = py_driver.PyDriver(
+          tf_env,
+          collect_policy,
+          observers=observers,
+          max_steps=max_steps)
+      return driver
+
+    initial_collect_driver = mk_driver(observers=[replay_buffer.add_batch], max_steps=initial_collect_steps)
+    collect_driver = mk_driver(observers=[replay_buffer.add_batch] + train_metrics, max_steps=collect_steps_per_iteration)
+
+    # initial_collect_driver = dynamic_step_driver.DynamicStepDriver(
+    #     tf_env,
+    #     collect_policy,
+    #     observers=[replay_buffer.add_batch],
+    #     num_steps=initial_collect_steps)
+    #
+    # collect_driver = dynamic_step_driver.DynamicStepDriver(
+    #     tf_env,
+    #     collect_policy,
+    #     observers=[replay_buffer.add_batch] + train_metrics,
+    #     num_steps=collect_steps_per_iteration)
 
     if use_tf_functions:
       logging.info("tf.function is ENABLED")
@@ -243,7 +322,15 @@ def train_eval(
     logging.info(
         'Initializing replay buffer by collecting experience for %d steps with '
         'a random policy.', initial_collect_steps)
-    initial_collect_driver.run()
+    if use_tf_replay_buffer:
+      initial_collect_driver.run()
+    else:
+      tf_env.reset()
+      time_step = tf_env.current_time_step()
+      policy_state = collect_policy.get_initial_state(tf_env.batch_size)
+      assert time_step is not None
+      assert not initial_collect_driver.policy._enable_functions
+      initial_collect_driver.run(time_step, policy_state)
 
     results = metric_utils.eager_compute(
         eval_metrics,
@@ -290,6 +377,7 @@ def train_eval(
 
       start_time = time.time()
       with rlscope_common.iml_prof_operation('collect_data'):
+        assert not collect_driver.policy._enable_functions
         time_step, policy_state = collect_driver.run(
             time_step=time_step,
             policy_state=policy_state,

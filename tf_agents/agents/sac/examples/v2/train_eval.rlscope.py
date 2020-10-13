@@ -138,13 +138,10 @@ def train_eval(
   #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
   #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
 
-  operations_available = set([
+  rlscope_common.iml_register_operations({
     'train_step',
     'collect_data',
-  ])
-  operations_seen = set([])
-  def iml_prof_operation(operation):
-    return rlscope_common.iml_prof_operation(operation, operations_seen, operations_available)
+  })
 
   train_summary_writer = tf.compat.v2.summary.create_file_writer(
       train_dir, flush_millis=summaries_flush_secs * 1000)
@@ -304,16 +301,16 @@ def train_eval(
 
     for iteration in range(num_iterations):
 
-      rlscope_common.before_each_iteration(FLAGS, iteration, num_iterations, operations_seen, operations_available)
+      rlscope_common.before_each_iteration(iteration, num_iterations)
 
       start_time = time.time()
-      with iml_prof_operation('collect_data'):
+      with rlscope_common.iml_prof_operation('collect_data'):
         time_step, policy_state = collect_driver.run(
             time_step=time_step,
             policy_state=policy_state,
         )
       for _ in range(train_steps_per_iteration):
-        with iml_prof_operation('train_step'):
+        with rlscope_common.iml_prof_operation('train_step'):
           train_loss = train_step()
       time_acc += time.time() - start_time
 
