@@ -12,7 +12,7 @@ import gym
 
 from tf_agents.environments import suite_mujoco, suite_gym, suite_pybullet
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 
 from absl import app
 from absl import flags
@@ -23,8 +23,8 @@ flags.DEFINE_bool('list_env', False, 'List available Environments')
 flags.DEFINE_bool('stable_baselines_hyperparams', False, 'Use hyperparameters from stable-baselines/rl-baselines-zoo instead of tf-agents defaults')
 flags.DEFINE_string('rl_baselines_zoo_dir', os.getenv('RL_BASELINES_ZOO_DIR', None),
                     'Root directory for writing logs/summaries/checkpoints.')
-iml.add_iml_arguments(flags)
-# iml.register_wrap_module(wrap_pybullet, unwrap_pybullet)
+rlscope.add_rlscope_arguments(flags)
+# rlscope.register_wrap_module(wrap_pybullet, unwrap_pybullet)
 
 # FLAGS = flags.FLAGS
 
@@ -59,36 +59,36 @@ def handle_train_eval_flags(FLAGS, algo):
       print(f"  {env_spec.id}")
     sys.exit(0)
 
-  # TODO: iterate over iml args and do this to fix:
-  #     FLAGS['iml_directory'] = FLAGS['iml-directory']
-  iml.fix_gflags_iml_args(FLAGS)
+  # TODO: iterate over rlscope args and do this to fix:
+  #     FLAGS['rlscope_directory'] = FLAGS['rlscope-directory']
+  rlscope.fix_gflags_rlscope_args(FLAGS)
 
-  if ( FLAGS.iml_directory is None and FLAGS.root_dir is None ) or \
-      ( FLAGS.iml_directory is not None and FLAGS.root_dir is not None ):
+  if ( FLAGS.rlscope_directory is None and FLAGS.root_dir is None ) or \
+      ( FLAGS.rlscope_directory is not None and FLAGS.root_dir is not None ):
     print(FLAGS.get_help(), file=sys.stderr)
-    logging.error("Need --root-dir or --iml-directory")
+    logging.error("Need --root-dir or --rlscope-directory")
     sys.exit(1)
 
   # logging.info(pprint.pformat({
-  #   'FLAGS.iml_directory': FLAGS.iml_directory,
+  #   'FLAGS.rlscope_directory': FLAGS.rlscope_directory,
   #   'FLAGS.root_dir': FLAGS.root_dir,
   # }))
 
-  if FLAGS.iml_directory is not None:
-    root_dir = os.path.join(FLAGS.iml_directory, 'train_eval')
-    iml_directory = os.path.join(FLAGS.iml_directory, 'iml')
+  if FLAGS.rlscope_directory is not None:
+    root_dir = os.path.join(FLAGS.rlscope_directory, 'train_eval')
+    rlscope_directory = os.path.join(FLAGS.rlscope_directory, 'rlscope')
   else:
     assert FLAGS.root_dir is not None
     root_dir = os.path.join(FLAGS.root_dir, 'train_eval')
-    iml_directory = os.path.join(FLAGS.root_dir, 'iml')
+    rlscope_directory = os.path.join(FLAGS.root_dir, 'rlscope')
 
-  iml.handle_gflags_iml_args(FLAGS, directory=iml_directory, reports_progress=True)
-  iml.prof.set_metadata({
+  rlscope.handle_gflags_rlscope_args(FLAGS, directory=rlscope_directory, reports_progress=True)
+  rlscope.prof.set_metadata({
     'algo': algo,
     'env': FLAGS.env_name,
   })
 
-  return root_dir, iml_directory, train_eval_kwargs
+  return root_dir, rlscope_directory, train_eval_kwargs
 
 def get_env_load_fn(env_name):
   # NOTE: Don't bother to use mujoco since it has annoying licensing; just use pybullet instead.
@@ -224,12 +224,12 @@ def before_each_iteration(iteration, num_iterations, is_warmed_up=None):
   waiting_for = OPERATIONS_AVAILABLE.difference(OPERATIONS_SEEN)
   should_report_progress = len(waiting_for) == 0 and ( is_warmed_up is None or is_warmed_up )
 
-  if iml.prof.delay and should_report_progress and not iml.prof.tracing_enabled:
-    # Entire training loop is now running; enable IML tracing
-    iml.prof.enable_tracing()
+  if rlscope.prof.delay and should_report_progress and not rlscope.prof.tracing_enabled:
+    # Entire training loop is now running; enable RL-Scope tracing
+    rlscope.prof.enable_tracing()
 
-  if iml.prof.debug:
-    iml.logger.info(textwrap.dedent("""\
+  if rlscope.prof.debug:
+    rlscope.logger.info(textwrap.dedent("""\
         RLS: @ t={iteration}: OPERATIONS_SEEN = {OPERATIONS_SEEN}
           waiting for = {waiting_for}
           is_warmed_up = {is_warmed_up}
@@ -241,15 +241,15 @@ def before_each_iteration(iteration, num_iterations, is_warmed_up=None):
     )).rstrip())
   if should_report_progress:
     OPERATIONS_SEEN.clear()
-    iml.prof.report_progress(
+    rlscope.prof.report_progress(
       percent_complete=iteration/float(num_iterations),
       num_timesteps=iteration,
       total_timesteps=num_iterations)
-    if iml.prof.tracing_enabled:
-      iml.logger.info(textwrap.dedent("""\
+    if rlscope.prof.tracing_enabled:
+      rlscope.logger.info(textwrap.dedent("""\
         RLS: @ t={iteration}: PASS {pass_idx}
         """.format(
-        pass_idx=iml.prof.pass_idx,
+        pass_idx=rlscope.prof.pass_idx,
         iteration=iteration,
       )).rstrip())
 
@@ -259,13 +259,13 @@ def before_each_iteration(iteration, num_iterations, is_warmed_up=None):
 OPERATIONS_SEEN = set()
 OPERATIONS_AVAILABLE = set()
 
-def iml_register_operations(operations):
+def rlscope_register_operations(operations):
   for operation in operations:
     OPERATIONS_AVAILABLE.add(operation)
 
-def iml_prof_operation(operation):
+def rlscope_prof_operation(operation):
   should_skip = operation not in OPERATIONS_AVAILABLE
-  op = iml.prof.operation(operation, skip=should_skip)
+  op = rlscope.prof.operation(operation, skip=should_skip)
   if not should_skip:
     OPERATIONS_SEEN.add(operation)
   return op
@@ -352,7 +352,7 @@ def load_stable_baselines_hyperparams(algo, env_id, rl_baselines_zoo_dir=None):
 
   Returns:
   """
-  from stable_baselines.iml.hyperparams import load_rl_baselines_zoo_hyperparams
+  from stable_baselines.rlscope.hyperparams import load_rl_baselines_zoo_hyperparams
 
   if rl_baselines_zoo_dir is None:
     rl_baselines_zoo_dir = os.getenv('RL_BASELINES_ZOO_DIR', None)

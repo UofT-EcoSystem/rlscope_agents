@@ -36,7 +36,7 @@ import os
 import time
 import re
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 
 from absl import app
 from absl import flags
@@ -126,12 +126,12 @@ def train_eval(
   # Set some default trace-collection termination conditions (if not set via the cmdline).
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
-  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+  # NOTE: DQN and SAC both call rlscope.prof.report_progress after each timestep
   # (hence, we run lots more iterations than DDPG/PPO).
-  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
-  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+  #rlscope.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+  #rlscope.prof.set_delay_training_loop_iters(10, skip_if_set=True)
 
-  rlscope_common.iml_register_operations({
+  rlscope_common.rlscope_register_operations({
     'train_step',
     'collect_data',
     # NOTE: This is called on every iteration... but we don't see it since its through a weird C++ -> Python callback.
@@ -156,10 +156,10 @@ def train_eval(
       tf_env = tf_py_environment.TFPyEnvironment(
           parallel_py_environment.ParallelPyEnvironment(
               [lambda: env_load_fn(env_name)] * num_parallel_environments),
-        # IML: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
-        iml_enabled=True)
+        # RL-Scope: Only enable annotation on the "root" call that initiates and blocks(?) on parallel step() calls.
+        rlscope_enabled=True)
     else:
-      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), iml_enabled=True)
+      tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name), rlscope_enabled=True)
     eval_env_name = eval_env_name or env_name
     eval_tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(eval_env_name))
 
@@ -282,20 +282,20 @@ def train_eval(
     # For some reason, "step" gets called >= 100 times for collect_steps_per_iteration=100.
     # Seems to be less than 200 usually.
     # I'm assuming that this is because environment will terminate and get reset() multiple times causing extra steps.
-    iml.prof.set_max_operations('step', collect_steps_per_iteration*2)
+    rlscope.prof.set_max_operations('step', collect_steps_per_iteration*2)
 
     for iteration in range(num_iterations):
 
       rlscope_common.before_each_iteration(iteration, num_iterations)
 
       start_time = time.time()
-      with rlscope_common.iml_prof_operation('collect_data'):
+      with rlscope_common.rlscope_prof_operation('collect_data'):
         time_step, policy_state = collect_driver.run(
             time_step=time_step,
             policy_state=policy_state,
         )
       for _ in range(train_steps_per_iteration):
-        with rlscope_common.iml_prof_operation('train_step'):
+        with rlscope_common.rlscope_prof_operation('train_step'):
           train_loss = train_step()
       time_acc += time.time() - start_time
 
@@ -338,7 +338,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'ddpg'
-  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, rlscope_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -351,15 +351,15 @@ def main(_):
     # stable-baselines does 100 [Inference, Simulator] steps per pass,
     # and 50 train_step per pass,
     # so scale down the number of passes to keep it close to 1 minute.
-    iml.prof.set_max_passes(25, skip_if_set=True)
+    rlscope.prof.set_max_passes(25, skip_if_set=True)
     # 1 configuration pass.
-    iml.prof.set_delay_passes(3, skip_if_set=True)
+    rlscope.prof.set_delay_passes(3, skip_if_set=True)
   else:
-    iml.prof.set_max_passes(2500, skip_if_set=True)
+    rlscope.prof.set_max_passes(2500, skip_if_set=True)
     # 1 configuration pass.
-    iml.prof.set_delay_passes(10, skip_if_set=True)
+    rlscope.prof.set_delay_passes(10, skip_if_set=True)
 
-  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+  with rlscope.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(root_dir,
                **train_eval_kwargs)
 

@@ -78,9 +78,9 @@ class PyDriver(driver.Driver):
     num_steps = 0
     num_episodes = 0
     while num_steps < self._max_steps and num_episodes < self._max_episodes:
-      # with rlscope_common.iml_prof_operation('sample_action'):
+      # with rlscope_common.rlscope_prof_operation('sample_action'):
       action_step = self.policy.action(time_step, policy_state)
-      with rlscope_common.iml_prof_operation('step'):
+      with rlscope_common.rlscope_prof_operation('step'):
         next_time_step = self.env.step(action_step.action)
 
       traj = trajectory.from_transition(time_step, action_step, next_time_step)

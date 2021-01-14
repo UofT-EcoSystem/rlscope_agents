@@ -25,7 +25,7 @@ import threading
 import traceback
 import textwrap
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 
 from absl import logging
 
@@ -71,7 +71,7 @@ class TFPyEnvironment(tf_environment.TFEnvironment):
   * This class currently cast rewards and discount to float32.
   """
 
-  def __init__(self, environment, check_dims=False, isolation=False, iml_enabled=False):
+  def __init__(self, environment, check_dims=False, isolation=False, rlscope_enabled=False):
     """Initializes a new `TFPyEnvironment`.
 
     Args:
@@ -113,7 +113,7 @@ class TFPyEnvironment(tf_environment.TFEnvironment):
       TypeError: If `isolation` is not `True`, `False`, or an instance of
         `multiprocessing.pool.Pool`.
     """
-    self.iml_enabled = iml_enabled
+    self.rlscope_enabled = rlscope_enabled
     if not isolation:
       self._pool = None
     elif isinstance(isolation, pool.Pool):
@@ -276,7 +276,7 @@ class TFPyEnvironment(tf_environment.TFEnvironment):
   # TODO(b/123600776): Remove override.
   @autograph.do_not_convert()
   def _step(self, actions):
-    # IML Q: Does this execute?
+    # RL-Scope Q: Does this execute?
     """Returns a TensorFlow op to step the environment.
 
     Args:
@@ -296,7 +296,7 @@ class TFPyEnvironment(tf_environment.TFEnvironment):
       ValueError: If any of the actions are scalars or their major axis is known
       and is not equal to `self.batch_size`.
     """
-    # logging.info("IML: TFPyEnvironment._step()")
+    # logging.info("RL-Scope: TFPyEnvironment._step()")
 
     def _step_py(*flattened_actions):
       with _check_not_called_concurrently(self._lock):
@@ -306,13 +306,13 @@ class TFPyEnvironment(tf_environment.TFEnvironment):
         return tf.nest.flatten(self._time_step)
 
     def _isolated_step_py(*flattened_actions):
-      # logging.info("IML: C++ -> Python: TFPyEnvironment._isolated_step_py():\n{stack}".format(
+      # logging.info("RL-Scope: C++ -> Python: TFPyEnvironment._isolated_step_py():\n{stack}".format(
       #   stack=textwrap.indent(''.join(traceback.format_stack()), prefix='  ').rstrip(),
       # ))
 
-      # IML: Callback from TensorFlow into Python via tf.numpy_function / tf.py_function
-      if self.iml_enabled:
-        with iml.prof.operation('step'):
+      # RL-Scope: Callback from TensorFlow into Python via tf.numpy_function / tf.py_function
+      if self.rlscope_enabled:
+        with rlscope.prof.operation('step'):
           # Running serial environment (TFPyEnvironment)
           return self._execute(_step_py, *flattened_actions)
       else:

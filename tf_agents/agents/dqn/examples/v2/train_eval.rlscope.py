@@ -53,7 +53,7 @@ from io import StringIO
 
 import traceback
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 
 from absl import app
 from absl import flags
@@ -148,7 +148,7 @@ def train_eval(
   train_dir = os.path.join(root_dir, 'train')
   eval_dir = os.path.join(root_dir, 'eval')
 
-  rlscope_common.iml_register_operations({
+  rlscope_common.rlscope_register_operations({
     'train_step',
     'collect_data',
     # 'log_metrics',
@@ -339,7 +339,7 @@ def train_eval(
       trace_name = 'collect_driver.run'
       if trace:
           logging.info(f"TRACE: {trace_name}")
-      with rlscope_common.iml_prof_operation('collect_data'):
+      with rlscope_common.rlscope_prof_operation('collect_data'):
         time_step, policy_state = with_summary_trace(
           lambda: collect_driver.run( # TFE_Py_Execute each loop iter
               time_step=time_step,
@@ -362,7 +362,7 @@ def train_eval(
         trace_name = 'tf_agent.train(experience)'
         if trace:
             logging.info(f"TRACE: {trace_name}")
-        with rlscope_common.iml_prof_operation('train_step'):
+        with rlscope_common.rlscope_prof_operation('train_step'):
           train_loss = with_summary_trace(
               lambda: train_step(), # TFE_Py_Execute each loop iter
               trace_name,
@@ -383,13 +383,13 @@ def train_eval(
       # CONCERN: GPU operations may still be running if operations are queued to run asynchronously
       # and block only when results are queryed.
       #
-      # with rlscope_common.iml_prof_operation('sleep_1_sec'):
+      # with rlscope_common.rlscope_prof_operation('sleep_1_sec'):
       #   time.sleep(1)
 
       global_step_value = None
       # Don't care about logging metrics for now.
       #
-      # with rlscope_common.iml_prof_operation('log_metrics'):
+      # with rlscope_common.rlscope_prof_operation('log_metrics'):
       global_step_value = global_step.numpy()
 
       if global_step_value % log_interval == 0: # TFE_Py_FastPathExecute x2 (one to read value, one to place data on current device)
@@ -420,7 +420,7 @@ def train_eval(
         # So, lets continue running eval_model, but ignore it's contribution to runtime
         # (which the code already does anyways when reporting steps per second).
         #
-        # with rlscope_common.iml_prof_operation('eval_model'):
+        # with rlscope_common.rlscope_prof_operation('eval_model'):
         results = metric_utils.eager_compute(
             eval_metrics,
             eval_tf_env,
@@ -467,7 +467,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'dqn'
-  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, rlscope_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -475,11 +475,11 @@ def main(_):
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
   # Roughly 1 minute when running --config time-breakdown
-  iml.prof.set_max_passes(2500, skip_if_set=True)
+  rlscope.prof.set_max_passes(2500, skip_if_set=True)
   # 1 configuration pass.
-  iml.prof.set_delay_passes(10, skip_if_set=True)
+  rlscope.prof.set_delay_passes(10, skip_if_set=True)
 
-  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+  with rlscope.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
       root_dir,
       use_tensorboard=FLAGS.use_tensorboard,

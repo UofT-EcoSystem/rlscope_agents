@@ -37,7 +37,7 @@ from __future__ import print_function
 import os
 import time
 
-import iml_profiler.api as iml
+import rlscope.api as rlscope
 
 from absl import app
 from absl import flags
@@ -133,12 +133,12 @@ def train_eval(
   # Set some default trace-collection termination conditions (if not set via the cmdline).
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
-  # NOTE: DQN and SAC both call iml.prof.report_progress after each timestep
+  # NOTE: DQN and SAC both call rlscope.prof.report_progress after each timestep
   # (hence, we run lots more iterations than DDPG/PPO).
-  #iml.prof.set_max_training_loop_iters(10000, skip_if_set=True)
-  #iml.prof.set_delay_training_loop_iters(10, skip_if_set=True)
+  #rlscope.prof.set_max_training_loop_iters(10000, skip_if_set=True)
+  #rlscope.prof.set_delay_training_loop_iters(10, skip_if_set=True)
 
-  rlscope_common.iml_register_operations({
+  rlscope_common.rlscope_register_operations({
     'train_step',
     'collect_data',
   })
@@ -304,13 +304,13 @@ def train_eval(
       rlscope_common.before_each_iteration(iteration, num_iterations)
 
       start_time = time.time()
-      with rlscope_common.iml_prof_operation('collect_data'):
+      with rlscope_common.rlscope_prof_operation('collect_data'):
         time_step, policy_state = collect_driver.run(
             time_step=time_step,
             policy_state=policy_state,
         )
       for _ in range(train_steps_per_iteration):
-        with rlscope_common.iml_prof_operation('train_step'):
+        with rlscope_common.rlscope_prof_operation('train_step'):
           train_loss = train_step()
       time_acc += time.time() - start_time
 
@@ -361,7 +361,7 @@ def main(_):
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
   algo = 'sac'
-  root_dir, iml_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
+  root_dir, rlscope_directory, train_eval_kwargs = rlscope_common.handle_train_eval_flags(FLAGS, algo=algo)
   process_name = f'{algo}_train_eval'
   phase_name = process_name
 
@@ -369,11 +369,11 @@ def main(_):
   # These were set via experimentation until training ran for "sufficiently long" (e.g. 2-4 minutes).
   #
   # Roughly 1 minute when running --config time-breakdown
-  iml.prof.set_max_passes(2500, skip_if_set=True)
+  rlscope.prof.set_max_passes(2500, skip_if_set=True)
   # 1 configuration pass.
-  iml.prof.set_delay_passes(10, skip_if_set=True)
+  rlscope.prof.set_delay_passes(10, skip_if_set=True)
 
-  with iml.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
+  with rlscope.prof.profile(process_name=process_name, phase_name=phase_name), rlscope_common.with_log_stacktraces():
     train_eval(
       root_dir,
       **train_eval_kwargs)
