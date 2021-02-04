@@ -82,7 +82,7 @@ def handle_train_eval_flags(FLAGS, algo):
     root_dir = os.path.join(FLAGS.root_dir, 'train_eval')
     rlscope_directory = os.path.join(FLAGS.root_dir, 'rlscope')
 
-  rlscope.handle_gflags_rlscope_args(FLAGS, directory=rlscope_directory, reports_progress=True)
+  rlscope.handle_gflags_rlscope_args(FLAGS, directory=rlscope_directory, reports_progress=True, delay=True)
   rlscope.prof.set_metadata({
     'algo': algo,
     'env': FLAGS.env_name,
